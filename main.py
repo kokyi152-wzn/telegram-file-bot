@@ -1,8 +1,13 @@
 import os
 import re
+import secrets
+import string
 import tempfile
 from pathlib import Path
+from datetime import datetime
+
 from dotenv import load_dotenv
+from pymongo import MongoClient
 from telegram import InputFile, Update
 from telegram.ext import (
     Application,
@@ -17,6 +22,16 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 CHANNEL_ID = os.getenv("CHANNEL_ID")
+MONGODB_URI = os.getenv("MONGODB_URI")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "telegram_bot")
+
+if not MONGODB_URI:
+    raise SystemExit("MONGODB_URI environment variable is required")
+
+db_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+db = db_client[MONGO_DB_NAME]
+files_col = db["files"]
+files_col.create_index("created_at")
 
 
 def remove_links_from_text(text: str) -> str:
@@ -29,9 +44,37 @@ def remove_links_from_text(text: str) -> str:
     return text.strip()
 
 
-def generate_deeplink(bot_username: str, file_id: str) -> str:
-    unique_id = str(int(__import__("time").time() * 1000))[-8:]
-    return f"https://t.me/{bot_username}?start={unique_id}"
+def generate_id(length: int = 6) -> str:
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def store_file(
+    file_id: str,
+    media_type: str,
+    caption: str = "",
+    filename: str = None,
+    file_size: int = None,
+) -> str:
+    doc = {
+        "file_id": file_id,
+        "media_type": media_type,
+        "caption": caption or "",
+        "filename": filename,
+        "file_size": file_size,
+        "created_at": datetime.utcnow(),
+    }
+    for _ in range(5):
+        _id = generate_id()
+        if not files_col.find_one({"_id": _id}):
+            doc["_id"] = _id
+            files_col.insert_one(doc)
+            return _id
+    raise RuntimeError("Could not generate a unique id")
+
+
+def build_deeplink(bot_username: str, short_id: str) -> str:
+    return f"https://t.me/{bot_username}?start={short_id}"
 
 
 def clean_filename(filename: str) -> str:
@@ -40,16 +83,55 @@ def clean_filename(filename: str) -> str:
     return remove_links_from_text(filename) or "movie"
 
 
+async def send_file_by_doc(message, doc) -> None:
+    media_type = doc["media_type"]
+    caption = doc.get("caption") or None
+    try:
+        if media_type == "video":
+            await message.reply_video(
+                video=doc["file_id"],
+                caption=caption,
+                supports_streaming=True,
+            )
+        elif media_type == "document":
+            await message.reply_document(
+                document=doc["file_id"],
+                filename=clean_filename(doc.get("filename")),
+                caption=caption,
+            )
+        elif media_type == "photo":
+            await message.reply_photo(photo=doc["file_id"], caption=caption)
+        elif media_type == "text":
+            await message.reply_text(doc.get("caption") or "")
+    except Exception as e:
+        print(f"Error sending media to user: {e}")
+        await message.reply_text(
+            "❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။"
+        )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Bot ကို Admin သာ အသုံးပြုနိုင်ပါတယ်။")
+    args = context.args
+    if args:
+        doc = files_col.find_one({"_id": args[0]})
+        if doc:
+            await send_file_by_doc(update.message, doc)
+            return
+        await update.message.reply_text("❌ ဒီဖိုင်ကို ရှာမတွေ့ပါ။ (link မှားနေနိုင်သည်)")
         return
 
-    await update.message.reply_text(
-        "Welcome Admin!\n\n"
-        "ဖိုင်/Video ပို့ပါ - Deeplink ထုတ်ပေးမယ်\n"
-        "Forward ပြီး ပို့ပါ - Channel မှာ post တင်ပေးမယ်"
-    )
+    if update.effective_user.id == ADMIN_ID:
+        await update.message.reply_text(
+            "Welcome Admin!\n\n"
+            "ဖိုင်/Video ပို့ပါ - Deeplink ထုတ်ပေးမယ်\n"
+            "Forward ပြီး ပို့ပါ - Channel မှာ post တင်ပေးမယ်\n"
+            "ဘယ် bot ကိုမဆို start လုပ်လို့ရတဲ့ လူတိုင်း ဖိုင်ရနိုင်ပါတယ်"
+        )
+    else:
+        await update.message.reply_text(
+            "ဒီ bot က movie/ဖိုင်တွေကို deeplink ကနေတစ်ဆင့် ရရှိနိုင်တဲ့ bot ပါ။\n"
+            "Admin ပေးထားတဲ့ link ကနေ ဖိုင်ရယူပါ။"
+        )
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -57,18 +139,29 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     video = update.message.video
-    caption = update.message.caption or video.file_name or ""
-    caption = remove_links_from_text(caption)
+    caption = remove_links_from_text(update.message.caption or video.file_name or "")
 
-    bot_username = context.bot.username
-    deeplink = generate_deeplink(bot_username, video.file_id)
+    try:
+        short_id = store_file(
+            video.file_id,
+            "video",
+            caption=caption,
+            filename=getattr(video, "file_name", None),
+            file_size=getattr(video, "file_size", None),
+        )
+    except Exception as e:
+        print(f"Error storing video: {e}")
+        await update.message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
+        return
 
+    deeplink = build_deeplink(context.bot.username, short_id)
     final_caption = f"{caption}\n\n🔗 {deeplink}" if caption else f"🔗 {deeplink}"
 
     try:
         await update.message.reply_video(
             video=video.file_id,
             caption=final_caption,
+            supports_streaming=True,
         )
     except Exception as e:
         print(f"Error sending video: {e}")
@@ -80,12 +173,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     doc = update.message.document
-    caption = update.message.caption or doc.file_name or ""
-    caption = remove_links_from_text(caption)
+    caption = remove_links_from_text(update.message.caption or doc.file_name or "")
 
-    bot_username = context.bot.username
-    deeplink = generate_deeplink(bot_username, doc.file_id)
+    try:
+        short_id = store_file(
+            doc.file_id,
+            "document",
+            caption=caption,
+            filename=doc.file_name,
+            file_size=doc.file_size,
+        )
+    except Exception as e:
+        print(f"Error storing document: {e}")
+        await update.message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
+        return
 
+    deeplink = build_deeplink(context.bot.username, short_id)
     final_caption = f"{caption}\n\n🔗 {deeplink}" if caption else f"🔗 {deeplink}"
 
     try:
@@ -104,13 +207,12 @@ async def download_and_reupload(
     media_type: str,
     media,
     caption: str,
-) -> None:
+) -> str:
     """Download file from source and re-upload it fresh, so the bot owns a copy.
 
-    ဒီနည်းနဲ့ source channel ပျက်သွားရင်လည်း bot ရဲ့ post မပျက်တော့ဘူး။
+    Returns the new (bot-owned) Telegram file_id.
     """
     bot = context.bot
-    msg = update.message
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         file = await bot.get_file(media.file_id)
@@ -136,34 +238,30 @@ async def download_and_reupload(
 
         clean_name = clean_filename(getattr(media, "file_name", None) or media_type)
 
-        try:
-            if media_type == "video":
-                await bot.send_video(
-                    chat_id=CHANNEL_ID,
-                    video=InputFile(local_path, filename=clean_name),
-                    caption=caption or None,
-                    supports_streaming=True,
-                    thumbnail=InputFile(thumb_path) if thumb_path else None,
-                )
-            elif media_type == "document":
-                await bot.send_document(
-                    chat_id=CHANNEL_ID,
-                    document=InputFile(local_path, filename=clean_name),
-                    caption=caption or None,
-                )
-            elif media_type == "photo":
-                await bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=InputFile(local_path),
-                    caption=caption or None,
-                )
-
-            deeplink = generate_deeplink(bot.username, media.file_id)
-            await msg.reply_text("✅ Movie post တင်ပြီးပါပြီ!")
-            await msg.reply_text(f"🔗 Deeplink: {deeplink}")
-        except Exception as e:
-            print(f"Error uploading fresh copy: {e}")
-            await msg.reply_text("❌ Post တင်ရာမှာ error ဖြစ်နေပါတယ်。")
+        if media_type == "video":
+            sent = await bot.send_video(
+                chat_id=CHANNEL_ID,
+                video=InputFile(local_path, filename=clean_name),
+                caption=caption or None,
+                supports_streaming=True,
+                thumbnail=InputFile(thumb_path) if thumb_path else None,
+            )
+            return sent.video.file_id
+        elif media_type == "document":
+            sent = await bot.send_document(
+                chat_id=CHANNEL_ID,
+                document=InputFile(local_path, filename=clean_name),
+                caption=caption or None,
+            )
+            return sent.document.file_id
+        elif media_type == "photo":
+            sent = await bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=InputFile(local_path),
+                caption=caption or None,
+            )
+            return sent.photo[-1].file_id
+        raise ValueError(f"Unsupported media type: {media_type}")
 
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -176,20 +274,40 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = remove_links_from_text(caption)
 
     try:
+        media_info = None
         if msg.video:
-            await download_and_reupload(
+            new_file_id = await download_and_reupload(
                 update, context, "video", msg.video, caption
             )
+            media_info = ("video", new_file_id, msg.video.file_size, msg.video.file_name)
         elif msg.document:
-            await download_and_reupload(
+            new_file_id = await download_and_reupload(
                 update, context, "document", msg.document, caption
             )
+            media_info = ("document", new_file_id, msg.document.file_size, msg.document.file_name)
         elif msg.photo:
-            await download_and_reupload(
+            new_file_id = await download_and_reupload(
                 update, context, "photo", msg.photo[-1], caption
             )
-        elif caption:
-            deeplink = generate_deeplink(context.bot.username, "text")
+            media_info = ("photo", new_file_id, None, None)
+
+        if media_info:
+            media_type, new_file_id, file_size, filename = media_info
+            short_id = store_file(
+                new_file_id,
+                media_type,
+                caption=caption,
+                filename=filename,
+                file_size=file_size,
+            )
+            deeplink = build_deeplink(context.bot.username, short_id)
+            await msg.reply_text("✅ Movie post တင်ပြီးပါပြီ!")
+            await msg.reply_text(f"🔗 Deeplink: {deeplink}")
+            return
+
+        if caption:
+            short_id = store_file("", "text", caption=caption)
+            deeplink = build_deeplink(context.bot.username, short_id)
             await context.bot.send_message(chat_id=CHANNEL_ID, text=caption)
             await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
             await msg.reply_text(f"🔗 Deeplink: {deeplink}")
@@ -203,8 +321,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not post:
         return
 
-    text = post.text or post.caption or ""
-    text = remove_links_from_text(text)
+    text = remove_links_from_text(post.text or post.caption or "")
 
     try:
         if post.video:
@@ -212,6 +329,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
                 chat_id=CHANNEL_ID,
                 video=post.video.file_id,
                 caption=text or None,
+                supports_streaming=True,
             )
         elif post.document:
             await context.bot.send_document(
@@ -223,6 +341,10 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         print(f"Error posting to channel: {e}")
 
 
+async def on_bot_error(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"Error: {context.error}")
+
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -231,6 +353,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document))
     app.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
+    app.add_error_handler(on_bot_error)
 
     print("Bot is running...")
     app.run_polling()
