@@ -37,6 +37,7 @@ if not MONGODB_URI:
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
+
 db_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
 db = db_client[MONGO_DB_NAME]
 files_col = db["files"]
@@ -86,10 +87,16 @@ def build_deeplink(bot_username: str, short_id: str) -> str:
     return f"https://t.me/{bot_username}?start={short_id}"
 
 
-def clean_filename(filename: str) -> str:
+def clean_filename(filename: str, fallback_ext: str = "") -> str:
     if not filename:
-        return "movie"
-    return remove_links_from_text(filename) or "movie"
+        return f"movie{fallback_ext}"
+    cleaned = remove_links_from_text(filename)
+    if not cleaned:
+        return f"movie{fallback_ext}"
+    _, ext = os.path.splitext(cleaned)
+    if not ext and fallback_ext:
+        cleaned += fallback_ext
+    return cleaned
 
 
 async def send_file_by_doc(message, doc) -> None:
@@ -115,7 +122,7 @@ async def send_file_by_doc(message, doc) -> None:
     except Exception as e:
         print(f"Error sending media to user: {e}")
         await message.reply_text(
-            "âŒ á€–á€­á€¯á€„á€ºá€•á€­á€¯á€·á€›á€¬á€™á€¾á€¬ error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹ á€á€á€€á€¼á€¬á€™á€¾ á€‘á€•á€ºá€€á€¼á€­á€¯á€¸á€…á€¬á€¸á€•á€«á‹"
+            "❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။"
         )
 
 
@@ -126,20 +133,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if doc:
             await send_file_by_doc(update.message, doc)
             return
-        await update.message.reply_text("âŒ á€’á€®á€–á€­á€¯á€„á€ºá€€á€­á€¯ á€›á€¾á€¬á€™á€á€½á€±á€·á€•á€«á‹ (link á€™á€¾á€¬á€¸á€”á€±á€”á€­á€¯á€„á€ºá€žá€Šá€º)")
+        await update.message.reply_text("❌ ဒီဖိုင်ကို ရှာမတွေ့ပါ။ (link မှားနေနိုင်သည်)")
         return
 
     if is_admin(update.effective_user.id):
         await update.message.reply_text(
             "Welcome Admin!\n\n"
-            "á€–á€­á€¯á€„á€º/Video á€•á€­á€¯á€·á€•á€« - Deeplink á€‘á€¯á€á€ºá€•á€±á€¸á€™á€šá€º\n"
-            "Forward á€•á€¼á€®á€¸ á€•á€­á€¯á€·á€•á€« - Channel á€™á€¾á€¬ post á€á€„á€ºá€•á€±á€¸á€™á€šá€º\n"
-            "á€˜á€šá€º bot á€€á€­á€¯á€™á€†á€­á€¯ start á€œá€¯á€•á€ºá€œá€­á€¯á€·á€›á€á€²á€· á€œá€°á€á€­á€¯á€„á€ºá€¸ á€–á€­á€¯á€„á€ºá€›á€”á€­á€¯á€„á€ºá€•á€«á€á€šá€º"
+            "ဖိုင်/Video ပို့ပါ - Deeplink ထုတ်ပေးမယ်\n"
+            "Forward ပြီး ပို့ပါ - Channel မှာ post တင်ပေးမယ်\n"
+            "ဘယ် bot ကိုမဆို start လုပ်လို့ရတဲ့ လူတိုင်း ဖိုင်ရနိုင်ပါတယ်"
         )
     else:
         await update.message.reply_text(
-            "á€’á€® bot á€€ movie/á€–á€­á€¯á€„á€ºá€á€½á€±á€€á€­á€¯ deeplink á€€á€”á€±á€á€…á€ºá€†á€„á€·á€º á€›á€›á€¾á€­á€”á€­á€¯á€„á€ºá€á€²á€· bot á€•á€«á‹\n"
-            "Admin á€•á€±á€¸á€‘á€¬á€¸á€á€²á€· link á€€á€”á€± á€–á€­á€¯á€„á€ºá€›á€šá€°á€•á€«á‹"
+            "ဒီ bot က movie/ဖိုင်တွေကို deeplink ကနေတစ်ဆင့် ရရှိနိုင်တဲ့ bot ပါ။\n"
+            "Admin ပေးထားတဲ့ link ကနေ ဖိုင်ရယူပါ။"
         )
 
 
@@ -160,11 +167,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         print(f"Error storing video: {e}")
-        await update.message.reply_text("âŒ Database error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹")
+        await update.message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
         return
 
     deeplink = build_deeplink(context.bot.username, short_id)
-    final_caption = f"{caption}\n\nðŸ”— {deeplink}" if caption else f"ðŸ”— {deeplink}"
+    final_caption = f"{caption}\n\n🔗 {deeplink}" if caption else f"🔗 {deeplink}"
 
     try:
         await update.message.reply_video(
@@ -174,7 +181,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         print(f"Error sending video: {e}")
-        await update.message.reply_text("Error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹")
+        await update.message.reply_text("Error ဖြစ်နေပါတယ်။")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -194,11 +201,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         print(f"Error storing document: {e}")
-        await update.message.reply_text("âŒ Database error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹")
+        await update.message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
         return
 
     deeplink = build_deeplink(context.bot.username, short_id)
-    final_caption = f"{caption}\n\nðŸ”— {deeplink}" if caption else f"ðŸ”— {deeplink}"
+    final_caption = f"{caption}\n\n🔗 {deeplink}" if caption else f"🔗 {deeplink}"
 
     try:
         await update.message.reply_document(
@@ -207,7 +214,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         print(f"Error sending document: {e}")
-        await update.message.reply_text("Error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹")
+        await update.message.reply_text("Error ဖြစ်နေပါတယ်။")
 
 
 async def download_and_reupload(
@@ -223,11 +230,15 @@ async def download_and_reupload(
     """
     bot = context.bot
 
+    original_name = getattr(media, "file_name", None) or media_type
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         file = await bot.get_file(media.file_id)
         suffix_map = {
             "video": ".mp4",
-            "document": Path(file.file_path or "").suffix or ".bin",
+            "document": Path(original_name).suffix
+            or Path(file.file_path or "").suffix
+            or ".bin",
             "photo": ".jpg",
         }
         suffix = suffix_map.get(media_type, ".bin")
@@ -245,7 +256,7 @@ async def download_and_reupload(
             except Exception:
                 thumb_path = None
 
-        clean_name = clean_filename(getattr(media, "file_name", None) or media_type)
+        clean_name = clean_filename(original_name, fallback_ext=suffix)
 
         if media_type == "video":
             sent = await bot.send_video(
@@ -310,19 +321,19 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_size=file_size,
             )
             deeplink = build_deeplink(context.bot.username, short_id)
-            await msg.reply_text("âœ… Movie post á€á€„á€ºá€•á€¼á€®á€¸á€•á€«á€•á€¼á€®!")
-            await msg.reply_text(f"ðŸ”— Deeplink: {deeplink}")
+            await msg.reply_text("✅ Movie post တင်ပြီးပါပြီ!")
+            await msg.reply_text(f"🔗 Deeplink: {deeplink}")
             return
 
         if caption:
             short_id = store_file("", "text", caption=caption)
             deeplink = build_deeplink(context.bot.username, short_id)
             await context.bot.send_message(chat_id=CHANNEL_ID, text=caption)
-            await msg.reply_text("âœ… Post á€á€„á€ºá€•á€¼á€®á€¸á€•á€«á€•á€¼á€®!")
-            await msg.reply_text(f"ðŸ”— Deeplink: {deeplink}")
+            await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
+            await msg.reply_text(f"🔗 Deeplink: {deeplink}")
     except Exception as e:
         print(f"Error posting forwarded: {e}")
-        await msg.reply_text("âŒ Post á€á€„á€ºá€›á€¬á€™á€¾á€¬ error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹")
+        await msg.reply_text("❌ Post တင်ရာမှာ error ဖြစ်နေပါတယ်။")
 
 
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
