@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import secrets
@@ -469,6 +470,11 @@ def start_health_server():
 
 def main():
     start_health_server()
+
+    # Python 3.12+ no longer auto-creates an event loop; python-telegram-bot 21.6
+    # relies on asyncio.get_event_loop() internally, which raises on Python 3.13/3.14.
+    # Create and set one explicitly so run_polling works on any Python version.
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
     app = Application.builder().token(BOT_TOKEN).build()
 
