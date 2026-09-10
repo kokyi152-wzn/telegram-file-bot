@@ -425,7 +425,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
             short_id = store_file(
                 new_file_id,
                 media_type,
-                caption=caption,
+                caption="" if media_type == "photo" else caption,
                 filename=filename,
                 file_size=file_size,
             )
