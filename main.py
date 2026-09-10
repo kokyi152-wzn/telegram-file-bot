@@ -5,6 +5,7 @@ import secrets
 import string
 import tempfile
 import threading
+import traceback
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -403,7 +404,8 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
             await msg.reply_text(f"🔗 Deeplink: {deeplink}")
     except Exception as e:
-        print(f"Error posting forwarded: {e}")
+        print(f"Error posting forwarded (msg type={msg.video and 'video' or msg.document and 'document' or msg.photo and 'photo' or 'text'}): {e}")
+        print(traceback.format_exc())
         await msg.reply_text("❌ Post တင်ရာမှာ error ဖြစ်နေပါတယ်။")
 
 
@@ -433,7 +435,8 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def on_bot_error(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"Error: {context.error}")
+    print(f"Unhandled error: {context.error}")
+    print(traceback.format_exc())
 
 
 class HealthHandler(BaseHTTPRequestHandler):
