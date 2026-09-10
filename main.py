@@ -10,9 +10,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from telegram import InputFile, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -87,6 +88,15 @@ def build_deeplink(bot_username: str, short_id: str) -> str:
     return f"https://t.me/{bot_username}?start={short_id}"
 
 
+def admin_menu_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton("📊 ဖိုင်စာရင်း", callback_data="menu_stats")],
+        [InlineKeyboardButton("📁 ဖိုင်ပို့နည်း", callback_data="menu_add")],
+        [InlineKeyboardButton("ℹ️ Bot အကြောင်း", callback_data="menu_help")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def clean_filename(filename: str, fallback_ext: str = "") -> str:
     if not filename:
         return f"movie{fallback_ext}"
@@ -141,12 +151,72 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Welcome Admin!\n\n"
             "ဖိုင်/Video ပို့ပါ - Deeplink ထုတ်ပေးမယ်\n"
             "Forward ပြီး ပို့ပါ - Channel မှာ post တင်ပေးမယ်\n"
-            "ဘယ် bot ကိုမဆို start လုပ်လို့ရတဲ့ လူတိုင်း ဖိုင်ရနိုင်ပါတယ်"
+            "ဘယ် bot ကိုမဆို start လုပ်လို့ရတဲ့ လူတိုင်း ဖိုင်ရနိုင်ပါတယ်\n\n"
+            "🎛 Menyu: /menu",
+            reply_markup=admin_menu_keyboard(),
         )
     else:
         await update.message.reply_text(
             "ဒီ bot က movie/ဖိုင်တွေကို deeplink ကနေတစ်ဆင့် ရရှိနိုင်တဲ့ bot ပါ။\n"
             "Admin ပေးထားတဲ့ link ကနေ ဖိုင်ရယူပါ။"
+        )
+
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    await update.message.reply_text(
+        "🎛 Admin Menu",
+        reply_markup=admin_menu_keyboard(),
+    )
+
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+
+    data = query.data
+    menu = admin_menu_keyboard()
+
+    if data == "menu_stats":
+        total = files_col.count_documents({})
+        videos = files_col.count_documents({"media_type": "video"})
+        docs = files_col.count_documents({"media_type": "document"})
+        photos = files_col.count_documents({"media_type": "photo"})
+        texts = files_col.count_documents({"media_type": "text"})
+        await query.edit_message_text(
+            "📊 ဖိုင်စာရင်း\n\n"
+            f"🎬 Video: {videos}\n"
+            f"📄 Document: {docs}\n"
+            f"🖼 Photo: {photos}\n"
+            f"📝 Text: {texts}\n\n"
+            f"အားလုံး: {total}",
+            reply_markup=menu,
+        )
+    elif data == "menu_add":
+        await query.edit_message_text(
+            "📁 ဖိုင်ပို့နည်း\n\n"
+            "1️⃣ ဖိုင်/Video ကို ဒီbot ထဲ ပို့ပါ\n"
+            "   → Deeplink ထုတ်ပေးပါမယ်\n\n"
+            "2️⃣ Forward ပြီး ပို့ပါ\n"
+            "   → Channel မှာ movie post တင်ပြီး Deeplink ထုတ်ပေးပါမယ်",
+            reply_markup=menu,
+        )
+    elif data == "menu_help":
+        await query.edit_message_text(
+            "ℹ️ Bot အကြောင်း\n\n"
+            "• Admin ပို့တဲ့ဖိုင် → Deeplink ထုတ်ပေး\n"
+            "• Deeplink click လုပ်သူ → ဖိုင်ရ\n"
+            "• Forward message → Channel post\n"
+            "• ဖိုင်နာမည်များကို မူရင်းအတိုင်း ထား",
+            reply_markup=menu,
+        )
+    else:
+        await query.edit_message_text(
+            "🎛 Admin Menu",
+            reply_markup=menu,
         )
 
 
@@ -403,6 +473,8 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", cmd_menu))
+    app.add_handler(CallbackQueryHandler(admin_callback))
     app.add_handler(MessageHandler(filters.VIDEO & ~filters.FORWARDED, handle_video))
     app.add_handler(MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document))
     app.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
