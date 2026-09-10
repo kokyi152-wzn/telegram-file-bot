@@ -150,17 +150,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_admin(update.effective_user.id):
         await update.message.reply_text(
-            "Welcome Admin!\n\n"
-            "ဖိုင်/Video ပို့ပါ - Deeplink ထုတ်ပေးမယ်\n"
-            "Forward ပြီး ပို့ပါ - Channel မှာ post တင်ပေးမယ်\n"
-            "ဘယ် bot ကိုမဆို start လုပ်လို့ရတဲ့ လူတိုင်း ဖိုင်ရနိုင်ပါတယ်\n\n"
-            "🎛 Menyu: /menu",
+            "🎛 Admin ကြိုဆိုပါတယ်!\n\n"
+            "📤 ဖိုင်/Video ပို့ပါ → Deeplink ထုတ်ပေးမယ်\n"
+            "↩️ Forward ပြီး ပို့ပါ → Channel မှာ post တင်ပေးမယ်\n"
+            "👥 ဘယ်သူမဆို ဒီဖိုင်တွေကို ရရှိနိုင်ပါတယ်\n\n"
+            "🎛 Menu ကြည့်ရန်: /menu",
             reply_markup=admin_menu_keyboard(),
         )
     else:
         await update.message.reply_text(
-            "ဒီ bot က movie/ဖိုင်တွေကို deeplink ကနေတစ်ဆင့် ရရှိနိုင်တဲ့ bot ပါ။\n"
-            "Admin ပေးထားတဲ့ link ကနေ ဖိုင်ရယူပါ။"
+            "ဒီ bot မှာ ဖိုင်/Video တွေကို deeplink ကနေတစ်ဆင့် ရရှိနိုင်ပါတယ်။\n"
+            "Admin ပေးထားတဲ့ link ကို နှိပ်ပြီး ဖိုင်ကို ရယူပါ။"
         )
 
 
@@ -168,7 +168,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     await update.message.reply_text(
-        "🎛 Admin Menu",
+        "🎛 Admin Menu ကြည့်ရန် အောက်က button တွေကို နှိပ်ပါ:",
         reply_markup=admin_menu_keyboard(),
     )
 
@@ -194,30 +194,32 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📄 Document: {docs}\n"
             f"🖼 Photo: {photos}\n"
             f"📝 Text: {texts}\n\n"
-            f"အားလုံး: {total}",
+            f"အားလုံးပေါင်း: {total}\n\n"
+            "🔝 ပြန်ကြည့်ရန် အောက်က Menu ကို သုံးပါ:",
             reply_markup=menu,
         )
     elif data == "menu_add":
         await query.edit_message_text(
             "📁 ဖိုင်ပို့နည်း\n\n"
-            "1️⃣ ဖိုင်/Video ကို ဒီbot ထဲ ပို့ပါ\n"
+            "1️⃣ ဖိုင်/Video ကို ဒီ bot ထဲ ပို့ပါ\n"
             "   → Deeplink ထုတ်ပေးပါမယ်\n\n"
             "2️⃣ Forward ပြီး ပို့ပါ\n"
-            "   → Channel မှာ movie post တင်ပြီး Deeplink ထုတ်ပေးပါမယ်",
+            "   → Channel မှာ movie post တင်ပြီး Deeplink ထုတ်ပေးပါမယ်\n\n"
+            "⚡ ဖိုင်ကြီးတွေကိုလည်း အဆင်ပြေ ပြေတင်နိုင်ပါတယ်",
             reply_markup=menu,
         )
     elif data == "menu_help":
         await query.edit_message_text(
             "ℹ️ Bot အကြောင်း\n\n"
             "• Admin ပို့တဲ့ဖိုင် → Deeplink ထုတ်ပေး\n"
-            "• Deeplink click လုပ်သူ → ဖိုင်ရ\n"
-            "• Forward message → Channel post\n"
-            "• ဖိုင်နာမည်များကို မူရင်းအတိုင်း ထား",
+            "• Deeplink နှိပ်သူ → ဖိုင် ရရှိမယ်\n"
+            "• Forward လုပ်ထားတဲ့ post → Channel မှာ တင်ပေး\n"
+            "• ဖိုင်နာမည်များကို မူရင်းအတိုင်း ထားပေး",
             reply_markup=menu,
         )
     else:
         await query.edit_message_text(
-            "🎛 Admin Menu",
+            "🎛 Admin Menu ကြည့်ရန် အောက်က button တွေကို နှိပ်ပါ:",
             reply_markup=menu,
         )
 
@@ -253,7 +255,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         print(f"Error sending video: {e}")
-        await update.message.reply_text("Error ဖြစ်နေပါတယ်။")
+        await update.message.reply_text("❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -286,24 +288,45 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         print(f"Error sending document: {e}")
-        await update.message.reply_text("Error ဖြစ်နေပါတယ်။")
+        await update.message.reply_text("❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။")
 
 
-async def download_and_reupload(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    media_type: str,
-    media,
-    caption: str,
-) -> str:
-    """Download file from source and re-upload it fresh, so the bot owns a copy.
+MAX_REUPLOAD_BYTES = 45 * 1024 * 1024  # Bot API InputFile upload limit = 50MB; keep 5MB margin
 
-    Returns the new (bot-owned) Telegram file_id.
+
+async def send_by_file_id(bot, media, media_type, caption, original_name) -> str:
+    """Send the original file_id straight to the channel (works up to 2GB)."""
+    if media_type == "video":
+        sent = await bot.send_video(
+            chat_id=CHANNEL_ID,
+            video=media.file_id,
+            caption=caption or None,
+            supports_streaming=True,
+        )
+        return sent.video.file_id
+    elif media_type == "document":
+        sent = await bot.send_document(
+            chat_id=CHANNEL_ID,
+            document=media.file_id,
+            filename=clean_filename(original_name),
+            caption=caption or None,
+        )
+        return sent.document.file_id
+    elif media_type == "photo":
+        sent = await bot.send_photo(
+            chat_id=CHANNEL_ID,
+            photo=media.file_id,
+            caption=caption or None,
+        )
+        return sent.photo[-1].file_id
+    raise ValueError(f"Unsupported media type: {media_type}")
+
+
+async def reupload_media(bot, media, media_type, caption, original_name) -> str:
+    """Download the file and re-upload it fresh, so the bot owns a copy.
+
+    Only used for files that fit the 50MB InputFile upload limit.
     """
-    bot = context.bot
-
-    original_name = getattr(media, "file_name", None) or media_type
-
     with tempfile.TemporaryDirectory() as tmp_dir:
         file = await bot.get_file(media.file_id)
         suffix_map = {
@@ -356,6 +379,23 @@ async def download_and_reupload(
         raise ValueError(f"Unsupported media type: {media_type}")
 
 
+async def send_media_to_channel(bot, media, media_type, caption, original_name) -> str:
+    """Re-upload small files fresh; send big files by file_id; photos by file_id."""
+    file_size = getattr(media, "file_size", None)
+
+    if media_type == "photo":
+        return await send_by_file_id(bot, media, media_type, caption, original_name)
+
+    if file_size is not None and file_size > MAX_REUPLOAD_BYTES:
+        return await send_by_file_id(bot, media, media_type, caption, original_name)
+
+    try:
+        return await reupload_media(bot, media, media_type, caption, original_name)
+    except Exception as e:
+        print(f"Re-upload failed ({e}); sending by file_id instead")
+        return await send_by_file_id(bot, media, media_type, caption, original_name)
+
+
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -368,20 +408,17 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         media_info = None
         if msg.video:
-            new_file_id = await download_and_reupload(
-                update, context, "video", msg.video, caption
-            )
-            media_info = ("video", new_file_id, msg.video.file_size, msg.video.file_name)
+            media = msg.video
+            media_type = "video"
+            media_info = await _forward_media(context, media, media_type, caption)
         elif msg.document:
-            new_file_id = await download_and_reupload(
-                update, context, "document", msg.document, caption
-            )
-            media_info = ("document", new_file_id, msg.document.file_size, msg.document.file_name)
+            media = msg.document
+            media_type = "document"
+            media_info = await _forward_media(context, media, media_type, caption)
         elif msg.photo:
-            new_file_id = await download_and_reupload(
-                update, context, "photo", msg.photo[-1], caption
-            )
-            media_info = ("photo", new_file_id, None, None)
+            media = msg.photo[-1]
+            media_type = "photo"
+            media_info = await _forward_media(context, media, media_type, caption)
 
         if media_info:
             media_type, new_file_id, file_size, filename = media_info
@@ -404,9 +441,17 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
             await msg.reply_text(f"🔗 Deeplink: {deeplink}")
     except Exception as e:
-        print(f"Error posting forwarded (msg type={msg.video and 'video' or msg.document and 'document' or msg.photo and 'photo' or 'text'}): {e}")
+        print(f"Error posting forwarded (type={msg.video and 'video' or msg.document and 'document' or msg.photo and 'photo' or 'text'}): {e}")
         print(traceback.format_exc())
         await msg.reply_text("❌ Post တင်ရာမှာ error ဖြစ်နေပါတယ်။")
+
+
+async def _forward_media(context, media, media_type, caption):
+    original_name = getattr(media, "file_name", None) or media_type
+    new_file_id = await send_media_to_channel(
+        context.bot, media, media_type, caption, original_name
+    )
+    return (media_type, new_file_id, getattr(media, "file_size", None), original_name)
 
 
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
