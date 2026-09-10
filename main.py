@@ -5,6 +5,7 @@ import secrets
 import string
 import tempfile
 import threading
+import time
 import traceback
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -638,19 +639,40 @@ def main():
     # Create and set one explicitly so run_polling works on any Python version.
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    while True:
+        app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("menu", cmd_menu))
-    app.add_handler(CallbackQueryHandler(admin_callback))
-    app.add_handler(MessageHandler(filters.VIDEO & ~filters.FORWARDED, handle_video))
-    app.add_handler(MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document))
-    app.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
-    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
-    app.add_error_handler(on_bot_error)
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("menu", cmd_menu))
+        app.add_handler(CallbackQueryHandler(admin_callback))
+        app.add_handler(MessageHandler(filters.VIDEO & ~filters.FORWARDED, handle_video))
+        app.add_handler(MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document))
+        app.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
+        app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
+        app.add_error_handler(on_bot_error)
 
-    print("Bot is running...")
-    app.run_polling()
+        restart_delay = 10
+        try:
+            print("Bot is running...")
+            # drop_pending_updates: never replay stale queued updates after a restart,
+            # otherwise a huge flood backlog reprocesses and re-triggers rate limits.
+            app.run_polling(drop_pending_updates=True)
+        except tg_error.Conflict as e:
+            print(f"Polling stopped by conflict ({e}). Restarting in 15s...")
+            restart_delay = 15
+        except tg_error.TelegramError as e:
+            print(f"Telegram error stopped polling ({e}). Restarting in 10s...")
+        except Exception as e:
+            print(f"Unexpected error stopped polling ({e}). Restarting in 10s...")
+
+        # Recreate the event loop for each restart (the old loop may be closed).
+        try:
+            app.shutdown()
+        except Exception:
+            pass
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        time.sleep(restart_delay)
 
 
 if __name__ == "__main__":
