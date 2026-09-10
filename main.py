@@ -3,8 +3,10 @@ import re
 import secrets
 import string
 import tempfile
-from pathlib import Path
+import threading
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -345,7 +347,41 @@ async def on_bot_error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"Error: {context.error}")
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def start_health_server():
+    """Render free spins services down after ~15 min idle.
+
+    This tiny HTTP server gives UptimeRobot something to ping every 5 min so
+    the polling bot stays awake.
+    """
+    port = int(os.getenv("PORT", "8000"))
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    except OSError as e:
+        print(f"Health server could not bind port {port}: {e}")
+        return
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"Health server listening on port {port}")
+
+
 def main():
+    start_health_server()
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
