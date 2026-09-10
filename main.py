@@ -13,6 +13,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
+from telegram import error as tg_error
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -55,6 +56,28 @@ def remove_links_from_text(text: str) -> str:
     text = re.sub(r"t\.me/[^\s]+", "", text)
     text = re.sub(r"\s{2,}", " ", text)
     return text.strip()
+
+
+async def run_with_retry(coro_factory, max_retries: int = 6):
+    """Run an async call, retrying on Telegram rate limits and network errors."""
+    retries = 0
+    while True:
+        try:
+            return await coro_factory()
+        except tg_error.RetryAfter as e:
+            wait = max(1, min(getattr(e, "retry_after", 1), 30))
+            print(f"Rate limited — waiting {wait}s (try {retries + 1}/{max_retries})")
+            await asyncio.sleep(wait)
+            retries += 1
+            if retries >= max_retries:
+                raise
+        except (tg_error.TimedOut, tg_error.NetworkError) as e:
+            wait = min(2 ** retries, 30)
+            print(f"Network error ({e}) — retrying in {wait}s (try {retries + 1}/{max_retries})")
+            await asyncio.sleep(wait)
+            retries += 1
+            if retries >= max_retries:
+                raise
 
 
 def generate_id(length: int = 6) -> str:
@@ -115,22 +138,24 @@ async def send_file_by_doc(message, doc) -> None:
     media_type = doc["media_type"]
     caption = doc.get("caption") or None
     try:
-        if media_type == "video":
-            await message.reply_video(
-                video=doc["file_id"],
-                caption=caption,
-                supports_streaming=True,
-            )
-        elif media_type == "document":
-            await message.reply_document(
-                document=doc["file_id"],
-                filename=clean_filename(doc.get("filename")),
-                caption=caption,
-            )
-        elif media_type == "photo":
-            await message.reply_photo(photo=doc["file_id"], caption=caption)
-        elif media_type == "text":
-            await message.reply_text(doc.get("caption") or "")
+        async def _send():
+            if media_type == "video":
+                return await message.reply_video(
+                    video=doc["file_id"],
+                    caption=caption,
+                    supports_streaming=True,
+                )
+            elif media_type == "document":
+                return await message.reply_document(
+                    document=doc["file_id"],
+                    filename=clean_filename(doc.get("filename")),
+                    caption=caption,
+                )
+            elif media_type == "photo":
+                return await message.reply_photo(photo=doc["file_id"], caption=caption)
+            elif media_type == "text":
+                return await message.reply_text(doc.get("caption") or "")
+        await run_with_retry(_send)
     except Exception as e:
         print(f"Error sending media to user: {e}")
         await message.reply_text(
@@ -384,16 +409,24 @@ async def send_media_to_channel(bot, media, media_type, caption, original_name) 
     file_size = getattr(media, "file_size", None)
 
     if media_type == "photo":
-        return await send_by_file_id(bot, media, media_type, caption, original_name)
+        return await run_with_retry(
+            lambda: send_by_file_id(bot, media, media_type, caption, original_name)
+        )
 
     if file_size is not None and file_size > MAX_REUPLOAD_BYTES:
-        return await send_by_file_id(bot, media, media_type, caption, original_name)
+        return await run_with_retry(
+            lambda: send_by_file_id(bot, media, media_type, caption, original_name)
+        )
 
     try:
-        return await reupload_media(bot, media, media_type, caption, original_name)
+        return await run_with_retry(
+            lambda: reupload_media(bot, media, media_type, caption, original_name)
+        )
     except Exception as e:
         print(f"Re-upload failed ({e}); sending by file_id instead")
-        return await send_by_file_id(bot, media, media_type, caption, original_name)
+        return await run_with_retry(
+            lambda: send_by_file_id(bot, media, media_type, caption, original_name)
+        )
 
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -437,7 +470,10 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if caption:
             short_id = store_file("", "text", caption=caption)
             deeplink = build_deeplink(context.bot.username, short_id)
-            await context.bot.send_message(chat_id=CHANNEL_ID, text=caption)
+            await run_with_retry(
+                lambda: context.bot.send_message(chat_id=CHANNEL_ID, text=caption)
+            )
+            await asyncio.sleep(1.1)
             await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
             await msg.reply_text(f"🔗 Deeplink: {deeplink}")
     except Exception as e:
@@ -451,6 +487,8 @@ async def _forward_media(context, media, media_type, caption):
     new_file_id = await send_media_to_channel(
         context.bot, media, media_type, caption, original_name
     )
+    # Telegram rate-limits channel posts to ~1 msg/sec; space out batch forwards.
+    await asyncio.sleep(1.1)
     return (media_type, new_file_id, getattr(media, "file_size", None), original_name)
 
 
