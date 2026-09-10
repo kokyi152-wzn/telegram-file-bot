@@ -10,6 +10,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
@@ -65,6 +66,57 @@ def remove_hashtags(text: str) -> str:
     text = re.sub(r"#\S+", " ", text)
     text = re.sub(r"\s{2,}", " ", text)
     return text.strip()
+
+
+_MYMEMORY_URL = "https://api.mymemory.translated.net/get"
+_GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
+
+
+async def translate_to_myanmar(text: str) -> str:
+    """Translate caption text to Myanmar (MyMemory free API, Google fallback).
+
+    Falls back to the original text on any error so posting never breaks.
+    """
+    if not text or not text.strip():
+        return text
+    if len(text.strip()) < 3:
+        return text
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            mymemory = await client.get(
+                _MYMEMORY_URL,
+                params={"q": text, "langpair": "auto|my"},
+            )
+            if mymemory.status_code == 200:
+                data = mymemory.json()
+                translated = (data.get("responseData") or {}).get("translatedText", "")
+                if translated and not data.get("quotaFinished"):
+                    return translated.strip()
+    except Exception as e:
+        print(f"MyMemory translation failed ({e}) — trying Google")
+
+    params = {
+        "client": "gtx",
+        "sl": "auto",
+        "tl": "my",
+        "dt": "t",
+        "q": text,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(_GOOGLE_TRANSLATE_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        parts = []
+        for seg in (data[0] or []):
+            if seg and seg[0]:
+                parts.append(seg[0])
+        translated = "".join(parts).strip()
+        return translated if translated else text
+    except Exception as e:
+        print(f"Google translation failed ({e}) — using original caption")
+        return text
 
 
 _CHANNEL_LOCK = asyncio.Lock()
@@ -463,6 +515,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = re.sub(r"@\w+", "", caption)
     caption = remove_links_from_text(caption)
     caption = remove_hashtags(caption)
+    caption = await translate_to_myanmar(caption)
 
     try:
         media_info = None
