@@ -418,7 +418,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif msg.photo:
             media = msg.photo[-1]
             media_type = "photo"
-            media_info = await _forward_media(context, media, media_type, caption)
+            media_info = await _forward_media(context, media, media_type, "")
 
         if media_info:
             media_type, new_file_id, file_size, filename = media_info
