@@ -58,21 +58,46 @@ def remove_links_from_text(text: str) -> str:
     return text.strip()
 
 
-async def run_with_retry(coro_factory, max_retries: int = 6):
+def remove_hashtags(text: str) -> str:
+    """Strip #hashtag words and '@mention' style noise, keeping the rest."""
+    if not text:
+        return text
+    text = re.sub(r"#\S+", " ", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+_CHANNEL_LOCK = asyncio.Lock()
+_last_channel_post_time = 0.0
+MIN_POST_INTERVAL = 1.2
+
+
+async def _pace_channel_post():
+    """Serialize + rate-limit every channel send (~1 msg/sec, flood-safe)."""
+    global _last_channel_post_time
+    async with _CHANNEL_LOCK:
+        elapsed = asyncio.get_event_loop().time() - _last_channel_post_time
+        if _last_channel_post_time and elapsed < MIN_POST_INTERVAL:
+            await asyncio.sleep(MIN_POST_INTERVAL - elapsed)
+        _last_channel_post_time = asyncio.get_event_loop().time()
+
+
+async def run_with_retry(coro_factory, max_retries: int = 12, base_pace: float = MIN_POST_INTERVAL):
     """Run an async call, retrying on Telegram rate limits and network errors."""
+    await _pace_channel_post()
     retries = 0
     while True:
         try:
             return await coro_factory()
         except tg_error.RetryAfter as e:
-            wait = max(1, min(getattr(e, "retry_after", 1), 30))
+            wait = max(1, getattr(e, "retry_after", 1)) + 2
             print(f"Rate limited — waiting {wait}s (try {retries + 1}/{max_retries})")
             await asyncio.sleep(wait)
             retries += 1
             if retries >= max_retries:
                 raise
         except (tg_error.TimedOut, tg_error.NetworkError) as e:
-            wait = min(2 ** retries, 30)
+            wait = min(2 ** retries, 30) + 2
             print(f"Network error ({e}) — retrying in {wait}s (try {retries + 1}/{max_retries})")
             await asyncio.sleep(wait)
             retries += 1
@@ -437,6 +462,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = remove_links_from_text(msg.caption or msg.text or "")
     caption = re.sub(r"@\w+", "", caption)
     caption = remove_links_from_text(caption)
+    caption = remove_hashtags(caption)
 
     try:
         media_info = None
@@ -473,7 +499,6 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await run_with_retry(
                 lambda: context.bot.send_message(chat_id=CHANNEL_ID, text=caption)
             )
-            await asyncio.sleep(1.1)
             await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
             await msg.reply_text(f"🔗 Deeplink: {deeplink}")
     except Exception as e:
@@ -487,8 +512,6 @@ async def _forward_media(context, media, media_type, caption):
     new_file_id = await send_media_to_channel(
         context.bot, media, media_type, caption, original_name
     )
-    # Telegram rate-limits channel posts to ~1 msg/sec; space out batch forwards.
-    await asyncio.sleep(1.1)
     return (media_type, new_file_id, getattr(media, "file_size", None), original_name)
 
 
