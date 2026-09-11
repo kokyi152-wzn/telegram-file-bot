@@ -30,6 +30,10 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_ID", "").split(",") if x.strip()]
 CHANNEL_ID = os.getenv("CHANNEL_ID")
+# CHANNEL_IDS (comma-separated) is the master list of channels to post to.
+# Falls back to the legacy CHANNEL_ID so old configs keep working.
+CHANNEL_IDS = [int(x.strip()) for x in os.getenv("CHANNEL_IDS", "").split(",") if x.strip()]
+POST_CHANNEL_IDS = CHANNEL_IDS or ([int(CHANNEL_ID)] if CHANNEL_ID else [])
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "telegram_bot")
 
@@ -212,6 +216,22 @@ def clean_filename(filename: str, fallback_ext: str = "") -> str:
     return cleaned
 
 
+AUTO_DELETE_SECONDS = 300  # deeplink deliveries self-destruct after 5 min
+
+
+async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int):
+    """Delete a delivered message after `delay` seconds (copyright safety)."""
+    try:
+        await asyncio.sleep(delay)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        print(f"Deleted deeplink delivery {message_id} after {delay}s")
+    except tg_error.BadRequest as e:
+        # Message already deleted / too old to delete — that's fine.
+        print(f"Auto-delete skipped ({e})")
+    except Exception as e:
+        print(f"Auto-delete failed: {e}")
+
+
 async def send_file_by_doc(message, doc) -> None:
     media_type = doc["media_type"]
     caption = doc.get("caption") or None
@@ -233,7 +253,15 @@ async def send_file_by_doc(message, doc) -> None:
                 return await message.reply_photo(photo=doc["file_id"], caption=caption)
             elif media_type == "text":
                 return await message.reply_text(doc.get("caption") or "")
-        await run_with_retry(_send)
+        sent = await run_with_retry(_send)
+        if sent is not None:
+            # Deliveries self-destruct after 5 minutes automatically.
+            context_bot = sent.get_bot()
+            asyncio.create_task(
+                _delete_after_delay(
+                    context_bot, sent.chat_id, sent.message_id, AUTO_DELETE_SECONDS
+                )
+            )
     except Exception as e:
         print(f"Error sending media to user: {e}")
         await message.reply_text(
@@ -397,11 +425,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 MAX_REUPLOAD_BYTES = 45 * 1024 * 1024  # Bot API InputFile upload limit = 50MB; keep 5MB margin
 
 
-async def send_by_file_id(bot, media, media_type, caption, original_name) -> str:
-    """Send the original file_id straight to the channel (works up to 2GB)."""
+async def send_by_file_id(bot, chat_id, media, media_type, caption, original_name) -> str:
+    """Send the original file_id straight to a channel (works up to 2GB)."""
     if media_type == "video":
         sent = await bot.send_video(
-            chat_id=CHANNEL_ID,
+            chat_id=chat_id,
             video=media.file_id,
             caption=caption or None,
             supports_streaming=True,
@@ -409,7 +437,7 @@ async def send_by_file_id(bot, media, media_type, caption, original_name) -> str
         return sent.video.file_id
     elif media_type == "document":
         sent = await bot.send_document(
-            chat_id=CHANNEL_ID,
+            chat_id=chat_id,
             document=media.file_id,
             filename=clean_filename(original_name),
             caption=caption or None,
@@ -417,7 +445,7 @@ async def send_by_file_id(bot, media, media_type, caption, original_name) -> str
         return sent.document.file_id
     elif media_type == "photo":
         sent = await bot.send_photo(
-            chat_id=CHANNEL_ID,
+            chat_id=chat_id,
             photo=media.file_id,
             caption=caption or None,
         )
@@ -425,7 +453,7 @@ async def send_by_file_id(bot, media, media_type, caption, original_name) -> str
     raise ValueError(f"Unsupported media type: {media_type}")
 
 
-async def reupload_media(bot, media, media_type, caption, original_name) -> str:
+async def reupload_media(bot, chat_id, media, media_type, caption, original_name) -> str:
     """Download the file and re-upload it fresh, so the bot owns a copy.
 
     Only used for files that fit the 50MB InputFile upload limit.
@@ -458,7 +486,7 @@ async def reupload_media(bot, media, media_type, caption, original_name) -> str:
 
         if media_type == "video":
             sent = await bot.send_video(
-                chat_id=CHANNEL_ID,
+                chat_id=chat_id,
                 video=InputFile(local_path, filename=clean_name),
                 caption=caption or None,
                 supports_streaming=True,
@@ -467,14 +495,14 @@ async def reupload_media(bot, media, media_type, caption, original_name) -> str:
             return sent.video.file_id
         elif media_type == "document":
             sent = await bot.send_document(
-                chat_id=CHANNEL_ID,
+                chat_id=chat_id,
                 document=InputFile(local_path, filename=clean_name),
                 caption=caption or None,
             )
             return sent.document.file_id
         elif media_type == "photo":
             sent = await bot.send_photo(
-                chat_id=CHANNEL_ID,
+                chat_id=chat_id,
                 photo=InputFile(local_path),
                 caption=caption or None,
             )
@@ -482,29 +510,50 @@ async def reupload_media(bot, media, media_type, caption, original_name) -> str:
         raise ValueError(f"Unsupported media type: {media_type}")
 
 
-async def send_media_to_channel(bot, media, media_type, caption, original_name) -> str:
+async def send_media_to_channel(bot, chat_id, media, media_type, caption, original_name) -> str:
     """Re-upload small files fresh; send big files by file_id; photos by file_id."""
     file_size = getattr(media, "file_size", None)
 
     if media_type == "photo":
         return await run_with_retry(
-            lambda: send_by_file_id(bot, media, media_type, caption, original_name)
+            lambda: send_by_file_id(bot, chat_id, media, media_type, caption, original_name)
         )
 
     if file_size is not None and file_size > MAX_REUPLOAD_BYTES:
         return await run_with_retry(
-            lambda: send_by_file_id(bot, media, media_type, caption, original_name)
+            lambda: send_by_file_id(bot, chat_id, media, media_type, caption, original_name)
         )
 
     try:
         return await run_with_retry(
-            lambda: reupload_media(bot, media, media_type, caption, original_name)
+            lambda: reupload_media(bot, chat_id, media, media_type, caption, original_name)
         )
     except Exception as e:
         print(f"Re-upload failed ({e}); sending by file_id instead")
         return await run_with_retry(
-            lambda: send_by_file_id(bot, media, media_type, caption, original_name)
+            lambda: send_by_file_id(bot, chat_id, media, media_type, caption, original_name)
         )
+
+
+async def post_to_all_channels(bot, media, media_type, caption, original_name) -> str:
+    """Post the same media into every configured channel; return last file_id.
+
+    Each channel gets the bot's OWN upload/post (never a Telegram 'forward'),
+    so the post survives even if the original forward source channel dies.
+    """
+    last_file_id = None
+    for chat_id in POST_CHANNEL_IDS:
+        try:
+            last_file_id = await send_media_to_channel(
+                bot, chat_id, media, media_type, caption, original_name
+            )
+            print(f"Posted {media_type} to channel {chat_id}")
+        except Exception as e:
+            print(f"Failed to post to channel {chat_id}: {e}")
+            print(traceback.format_exc())
+    if not last_file_id:
+        raise RuntimeError("Media could not be posted to any channel")
+    return last_file_id
 
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -550,9 +599,12 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if caption:
             short_id = store_file("", "text", caption=caption)
             deeplink = build_deeplink(context.bot.username, short_id)
-            await run_with_retry(
-                lambda: context.bot.send_message(chat_id=CHANNEL_ID, text=caption)
-            )
+            for chat_id in POST_CHANNEL_IDS:
+                await run_with_retry(
+                    lambda chat_id=chat_id: context.bot.send_message(
+                        chat_id=chat_id, text=caption
+                    )
+                )
             await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
             await msg.reply_text(f"🔗 Deeplink: {deeplink}")
     except Exception as e:
@@ -563,7 +615,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _forward_media(context, media, media_type, caption):
     original_name = getattr(media, "file_name", None) or media_type
-    new_file_id = await send_media_to_channel(
+    new_file_id = await post_to_all_channels(
         context.bot, media, media_type, caption, original_name
     )
     return (media_type, new_file_id, getattr(media, "file_size", None), original_name)
@@ -578,20 +630,22 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         if post.video:
-            await context.bot.send_video(
-                chat_id=CHANNEL_ID,
-                video=post.video.file_id,
-                caption=text or None,
-                supports_streaming=True,
-            )
+            for chat_id in POST_CHANNEL_IDS:
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=post.video.file_id,
+                    caption=text or None,
+                    supports_streaming=True,
+                )
         elif post.document:
-            await context.bot.send_document(
-                chat_id=CHANNEL_ID,
-                document=post.document.file_id,
-                caption=text or None,
-            )
+            for chat_id in POST_CHANNEL_IDS:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=post.document.file_id,
+                    caption=text or None,
+                )
     except Exception as e:
-        print(f"Error posting to channel: {e}")
+        print(f"Error posting to channels: {e}")
 
 
 async def on_bot_error(update: Update, context: ContextTypes.DEFAULT_TYPE):
