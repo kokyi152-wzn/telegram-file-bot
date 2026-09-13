@@ -84,6 +84,16 @@ def contains_chinese(text: str) -> bool:
     return bool(text and CJK_RE.search(text))
 
 
+_MYMEMORY_ERROR_MARKERS = ("LANGPAIR", "INVALID SOURCE", "MYMEMORY WARNING", "UNABLE TO", "NO QUOTA")
+
+
+def _is_mymemory_error(text: str) -> bool:
+    if not text:
+        return False
+    upper = text.upper()
+    return any(marker in upper for marker in _MYMEMORY_ERROR_MARKERS)
+
+
 async def _translate_text(text: str, target_lang: str) -> str:
     """Translate text to target_lang (MyMemory free API, Google fallback).
 
@@ -94,16 +104,21 @@ async def _translate_text(text: str, target_lang: str) -> str:
     if len(text.strip()) < 3:
         return text
 
+    source_lang = "zh-CN" if contains_chinese(text) else "en"
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             mymemory = await client.get(
                 _MYMEMORY_URL,
-                params={"q": text, "langpair": f"auto|{target_lang}"},
+                params={"q": text, "langpair": f"{source_lang}|{target_lang}"},
             )
             if mymemory.status_code == 200:
                 data = mymemory.json()
                 translated = (data.get("responseData") or {}).get("translatedText", "")
-                if translated and not data.get("quotaFinished"):
+                if (
+                    translated
+                    and not data.get("quotaFinished")
+                    and not _is_mymemory_error(translated)
+                ):
                     return translated.strip()
     except Exception as e:
         print(f"MyMemory translation failed ({e}) — trying Google")
