@@ -118,6 +118,7 @@ async def _translate_text(text: str, target_lang: str) -> str:
                     translated
                     and not data.get("quotaFinished")
                     and not _is_mymemory_error(translated)
+                    and not (contains_chinese(text) and contains_chinese(translated))
                 ):
                     return translated.strip()
     except Exception as e:
