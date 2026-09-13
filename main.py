@@ -587,7 +587,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
             short_id = store_file(
                 new_file_id,
                 media_type,
-                caption="" if media_type == "photo" else caption,
+                caption=caption,
                 filename=filename,
                 file_size=file_size,
             )
@@ -627,6 +627,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     text = remove_links_from_text(post.text or post.caption or "")
+    text = await translate_to_myanmar(text)
 
     try:
         if post.video:
@@ -642,6 +643,13 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await context.bot.send_document(
                     chat_id=chat_id,
                     document=post.document.file_id,
+                    caption=text or None,
+                )
+        elif post.photo:
+            for chat_id in POST_CHANNEL_IDS:
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=post.photo[-1].file_id,
                     caption=text or None,
                 )
     except Exception as e:
