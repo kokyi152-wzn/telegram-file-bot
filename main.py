@@ -77,8 +77,15 @@ _MYMEMORY_URL = "https://api.mymemory.translated.net/get"
 _GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 
 
-async def translate_to_myanmar(text: str) -> str:
-    """Translate caption text to Myanmar (MyMemory free API, Google fallback).
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def contains_chinese(text: str) -> bool:
+    return bool(text and CJK_RE.search(text))
+
+
+async def _translate_text(text: str, target_lang: str) -> str:
+    """Translate text to target_lang (MyMemory free API, Google fallback).
 
     Falls back to the original text on any error so posting never breaks.
     """
@@ -91,7 +98,7 @@ async def translate_to_myanmar(text: str) -> str:
         async with httpx.AsyncClient(timeout=20) as client:
             mymemory = await client.get(
                 _MYMEMORY_URL,
-                params={"q": text, "langpair": "auto|my"},
+                params={"q": text, "langpair": f"auto|{target_lang}"},
             )
             if mymemory.status_code == 200:
                 data = mymemory.json()
@@ -104,7 +111,7 @@ async def translate_to_myanmar(text: str) -> str:
     params = {
         "client": "gtx",
         "sl": "auto",
-        "tl": "my",
+        "tl": target_lang,
         "dt": "t",
         "q": text,
     }
@@ -120,8 +127,49 @@ async def translate_to_myanmar(text: str) -> str:
         translated = "".join(parts).strip()
         return translated if translated else text
     except Exception as e:
-        print(f"Google translation failed ({e}) — using original caption")
+        print(f"Google translation failed ({e}) — using original text")
         return text
+
+
+async def translate_to_myanmar(text: str) -> str:
+    return await _translate_text(text, "my")
+
+
+def _clean_title(text: str) -> str:
+    if not text:
+        return ""
+    text = remove_links_from_text(text)
+    text = re.sub(r"@\w+", " ", text)
+    text = remove_hashtags(text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip().strip("._ -")
+
+
+def _file_stem(name: str) -> str:
+    if not name:
+        return ""
+    return Path(_clean_title(name)).stem
+
+
+async def make_movie_title(file_name: str, caption_fallback: str = "") -> str:
+    """Channel title = the file's ORIGINAL name from the computer/drive.
+
+    The Telegram caption is ignored. If the name is Chinese, it is posted as
+    '<English> (<Myanmar>)'. Falls back to the cleaned caption only when the
+    file has no name at all (e.g. bare Telegram photos).
+    """
+    name = _file_stem(file_name)
+    if not name:
+        name = _clean_title(caption_fallback)
+    if not name:
+        return ""
+    if not contains_chinese(name):
+        return name
+    en = (await _translate_text(name, "en") or name).strip()
+    my = (await _translate_text(name, "my") or name).strip()
+    if not my or my == en:
+        return en
+    return f"{en} ({my})"
 
 
 _CHANNEL_LOCK = asyncio.Lock()
@@ -360,14 +408,15 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     video = update.message.video
-    caption = remove_links_from_text(update.message.caption or video.file_name or "")
+    file_name = getattr(video, "file_name", None) or ""
+    title = await make_movie_title(file_name, "")
 
     try:
         short_id = store_file(
             video.file_id,
             "video",
-            caption=caption,
-            filename=getattr(video, "file_name", None),
+            caption=title,
+            filename=file_name or None,
             file_size=getattr(video, "file_size", None),
         )
     except Exception as e:
@@ -376,7 +425,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     deeplink = build_deeplink(context.bot.username, short_id)
-    final_caption = f"{caption}\n\n🔗 {deeplink}" if caption else f"🔗 {deeplink}"
+    final_caption = f"{title}\n\n🔗 {deeplink}" if title else f"🔗 {deeplink}"
 
     try:
         await update.message.reply_video(
@@ -394,14 +443,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     doc = update.message.document
-    caption = remove_links_from_text(update.message.caption or doc.file_name or "")
+    file_name = doc.file_name or ""
+    title = await make_movie_title(file_name, "")
 
     try:
         short_id = store_file(
             doc.file_id,
             "document",
-            caption=caption,
-            filename=doc.file_name,
+            caption=title,
+            filename=file_name,
             file_size=doc.file_size,
         )
     except Exception as e:
@@ -410,7 +460,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     deeplink = build_deeplink(context.bot.username, short_id)
-    final_caption = f"{caption}\n\n🔗 {deeplink}" if caption else f"🔗 {deeplink}"
+    final_caption = f"{title}\n\n🔗 {deeplink}" if title else f"🔗 {deeplink}"
 
     try:
         await update.message.reply_document(
@@ -419,6 +469,41 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         print(f"Error sending document: {e}")
+        await update.message.reply_text("❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+
+    photo = update.message.photo[-1]
+    # Bare Telegram photos don't keep the original file name, so fall back to
+    # the caption (cleaned + translated) instead of dropping the title.
+    title = await make_movie_title("", update.message.caption or "")
+
+    try:
+        short_id = store_file(
+            photo.file_id,
+            "photo",
+            caption=title,
+            filename=None,
+            file_size=getattr(photo, "file_size", None),
+        )
+    except Exception as e:
+        print(f"Error storing photo: {e}")
+        await update.message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
+        return
+
+    deeplink = build_deeplink(context.bot.username, short_id)
+    final_caption = f"{title}\n\n🔗 {deeplink}" if title else f"🔗 {deeplink}"
+
+    try:
+        await update.message.reply_photo(
+            photo=photo.file_id,
+            caption=final_caption,
+        )
+    except Exception as e:
+        print(f"Error sending photo: {e}")
         await update.message.reply_text("❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။")
 
 
@@ -561,33 +646,47 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = update.message
-    caption = remove_links_from_text(msg.caption or msg.text or "")
-    caption = re.sub(r"@\w+", "", caption)
-    caption = remove_links_from_text(caption)
-    caption = remove_hashtags(caption)
-    caption = await translate_to_myanmar(caption)
+    raw_caption = (msg.caption or "").strip()
+
+    media = msg.video or msg.document or (msg.photo and msg.photo[-1])
+    if media is None:
+        caption = await translate_to_myanmar(raw_caption)
+        if not caption:
+            return
+        short_id = store_file("", "text", caption=caption)
+        deeplink = build_deeplink(context.bot.username, short_id)
+        for chat_id in POST_CHANNEL_IDS:
+            await run_with_retry(
+                lambda chat_id=chat_id: context.bot.send_message(
+                    chat_id=chat_id, text=caption
+                )
+            )
+        await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
+        await msg.reply_text(f"🔗 Deeplink: {deeplink}")
+        return
 
     try:
         media_info = None
         if msg.video:
             media = msg.video
             media_type = "video"
-            media_info = await _forward_media(context, media, media_type, caption)
         elif msg.document:
             media = msg.document
             media_type = "document"
-            media_info = await _forward_media(context, media, media_type, caption)
-        elif msg.photo:
+        else:
             media = msg.photo[-1]
             media_type = "photo"
-            media_info = await _forward_media(context, media, media_type, "")
+
+        name = getattr(media, "file_name", None) or ""
+        title = await make_movie_title(name, raw_caption)
+        media_info = await _forward_media(context, media, media_type, title)
 
         if media_info:
             media_type, new_file_id, file_size, filename = media_info
             short_id = store_file(
                 new_file_id,
                 media_type,
-                caption=caption,
+                caption=title,
                 filename=filename,
                 file_size=file_size,
             )
@@ -596,13 +695,13 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(f"🔗 Deeplink: {deeplink}")
             return
 
-        if caption:
-            short_id = store_file("", "text", caption=caption)
+        if title:
+            short_id = store_file("", "text", caption=title)
             deeplink = build_deeplink(context.bot.username, short_id)
             for chat_id in POST_CHANNEL_IDS:
                 await run_with_retry(
                     lambda chat_id=chat_id: context.bot.send_message(
-                        chat_id=chat_id, text=caption
+                        chat_id=chat_id, text=title
                     )
                 )
             await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
@@ -709,6 +808,7 @@ def main():
         app.add_handler(CallbackQueryHandler(admin_callback))
         app.add_handler(MessageHandler(filters.VIDEO & ~filters.FORWARDED, handle_video))
         app.add_handler(MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document))
+        app.add_handler(MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo))
         app.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
         app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
         app.add_error_handler(on_bot_error)
