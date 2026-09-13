@@ -279,6 +279,23 @@ def clean_filename(filename: str, fallback_ext: str = "") -> str:
     return cleaned
 
 
+def english_file_name(title: str, original_name: str) -> str:
+    """English-only file name for channel posts (keeps the original extension).
+
+    'English (မြန်မာ)' -> 'English' + original extension, so the download
+    name on the channel is English even when the source file was Chinese.
+    """
+    ext = Path(original_name or "").suffix
+    en = title or ""
+    m = re.match(r"^(.*?)\s*\(", en)
+    if m:
+        en = m.group(1).strip()
+    base = _clean_title(en) or Path(en).stem
+    if not base:
+        base = Path(original_name or "movie").stem
+    return clean_filename(base, fallback_ext=ext or ".mp4")
+
+
 AUTO_DELETE_SECONDS = 300  # deeplink deliveries self-destruct after 5 min
 
 
@@ -460,13 +477,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     file_name = doc.file_name or ""
     title = await make_movie_title(file_name, "")
+    post_name = english_file_name(title, file_name)
 
     try:
         short_id = store_file(
             doc.file_id,
             "document",
             caption=title,
-            filename=file_name,
+            filename=post_name,
             file_size=doc.file_size,
         )
     except Exception as e:
@@ -480,6 +498,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_document(
             document=doc.file_id,
+            filename=clean_filename(post_name) if title else None,
             caption=final_caption,
         )
     except Exception as e:
@@ -729,10 +748,11 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _forward_media(context, media, media_type, caption):
     original_name = getattr(media, "file_name", None) or media_type
+    post_name = english_file_name(caption, original_name)
     new_file_id = await post_to_all_channels(
-        context.bot, media, media_type, caption, original_name
+        context.bot, media, media_type, caption, post_name
     )
-    return (media_type, new_file_id, getattr(media, "file_size", None), original_name)
+    return (media_type, new_file_id, getattr(media, "file_size", None), post_name)
 
 
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
