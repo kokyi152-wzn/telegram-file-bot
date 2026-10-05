@@ -367,61 +367,106 @@ def _extract_media(message):
     return None, None
 
 
-ALBUM_BUFFERS = {}
 ALBUM_WAIT = 1.5
 ALBUM_MAX = 10
+ALBUM_GRACE = 0.6  # short wait so late album parts still join the same group
+
+# Every admin upload goes through ONE serial worker, so the channel always
+# shows them in the exact order the admin sent them (albums included).
+_MEDIA_QUEUE = None
+_MEDIA_WORKER = None
 
 
-async def _queue_album(context, message, on_done):
-    """Buffer every part of a media group, then publish the whole album once."""
-    key = f"{message.chat.id}:{message.media_group_id}"
-    buf = ALBUM_BUFFERS.get(key)
-    if buf is None:
-        buf = {
-            "items": [],
-            "context": context,
-            "message": message,
-            "on_done": on_done,
-            "task": None,
-        }
-        ALBUM_BUFFERS[key] = buf
+def _ensure_media_worker():
+    global _MEDIA_QUEUE, _MEDIA_WORKER
+    if _MEDIA_WORKER is None or _MEDIA_WORKER.done():
+        _MEDIA_QUEUE = asyncio.Queue()
+        _MEDIA_WORKER = asyncio.create_task(_media_worker())
+    return _MEDIA_QUEUE
 
+
+def _enqueue_media(context, message, forwarded=False):
+    """Queue one upload in arrival order instead of posting it immediately."""
     media_type, media = _extract_media(message)
     if media is None:
         return
-    buf["items"].append(
+    queue = _ensure_media_worker()
+    album_key = None
+    if getattr(message, "media_group_id", None):
+        album_key = f"{message.chat.id}:{message.media_group_id}"
+    queue.put_nowait(
         {
+            "context": context,
+            "message": message,
             "media_type": media_type,
             "media": media,
             "file_name": getattr(media, "file_name", None) or "",
             "caption": message.caption or "",
+            "album_key": album_key,
+            "forwarded": forwarded,
         }
     )
-    buf["message"] = message
-
-    if buf["task"] and not buf["task"].done():
-        buf["task"].cancel()
-    buf["task"] = asyncio.create_task(_flush_album(key))
 
 
-async def _flush_album(key):
-    try:
-        await asyncio.sleep(ALBUM_WAIT)
-    except asyncio.CancelledError:
-        return
-    buf = ALBUM_BUFFERS.pop(key, None)
-    if not buf or not buf["items"]:
-        return
-    try:
-        await buf["on_done"](buf["context"], buf)
-    except Exception as e:
-        print(f"Album processing failed: {e}")
+async def _media_worker():
+    """Process queued uploads one at a time, strictly in the order received."""
+    pending = None
+    while True:
+        entry = await _MEDIA_QUEUE.get()
         try:
-            await buf["message"].reply_text(
-                f"❌ Album တင်ရာမှာ error ဖြစ်နေပါတယ်။\n{e}"
-            )
-        except Exception:
-            pass
+            key = entry["album_key"]
+
+            if pending and pending["key"] != key:
+                await _publish_album(pending["context"], pending)
+                pending = None
+
+            if key is None:
+                if entry["forwarded"]:
+                    await _publish_forward_single(
+                        entry["context"],
+                        entry["message"],
+                        entry["media_type"],
+                        entry["media"],
+                    )
+                else:
+                    await _process_single(
+                        entry["context"],
+                        entry["message"],
+                        entry["media_type"],
+                        entry["media"],
+                    )
+            else:
+                if pending is None:
+                    pending = {
+                        "key": key,
+                        "context": entry["context"],
+                        "message": entry["message"],
+                        "items": [],
+                    }
+                pending["items"].append(
+                    {
+                        "media_type": entry["media_type"],
+                        "media": entry["media"],
+                        "file_name": entry["file_name"],
+                        "caption": entry["caption"],
+                    }
+                )
+                pending["message"] = entry["message"]
+
+            # Album tail: nothing else is waiting, so publish the group.
+            if pending and _MEDIA_QUEUE.empty():
+                await asyncio.sleep(ALBUM_GRACE)
+                if _MEDIA_QUEUE.empty():
+                    await _publish_album(pending["context"], pending)
+                    pending = None
+        except Exception as e:
+            print(f"Media processing failed: {e}")
+            try:
+                await entry["message"].reply_text(
+                    f"❌ တင်ရာမှာ error ဖြစ်နေပါတယ်။\n{e}"
+                )
+            except Exception:
+                pass
 
 
 async def _album_items_from(buf):
@@ -763,36 +808,21 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
 
-    message = update.message
-    if getattr(message, "media_group_id", None):
-        await _queue_album(context, message, _publish_album)
-        return
-
-    await _process_single(context, message, "video", message.video)
+    _enqueue_media(context, update.message)
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
 
-    message = update.message
-    if getattr(message, "media_group_id", None):
-        await _queue_album(context, message, _publish_album)
-        return
-
-    await _process_single(context, message, "document", message.document)
+    _enqueue_media(context, update.message)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
 
-    message = update.message
-    if getattr(message, "media_group_id", None):
-        await _queue_album(context, message, _publish_album)
-        return
-
-    await _process_single(context, message, "photo", message.photo[-1])
+    _enqueue_media(context, update.message)
 
 
 MAX_REUPLOAD_BYTES = 45 * 1024 * 1024  # Bot API InputFile upload limit = 50MB; keep 5MB margin
@@ -929,6 +959,26 @@ async def post_to_all_channels(bot, media, media_type, caption, original_name) -
     return last_file_id
 
 
+async def _publish_forward_single(context, msg, media_type, media):
+    """Repost one forwarded file to the channels, then hand out its deeplink."""
+    name = getattr(media, "file_name", None) or ""
+    title = await make_movie_title(name, (msg.caption or "").strip())
+    media_info = await _forward_media(context, media, media_type, title)
+
+    if media_info:
+        media_type, new_file_id, file_size, filename = media_info
+        short_id = store_file(
+            new_file_id,
+            media_type,
+            caption=title,
+            filename=filename,
+            file_size=file_size,
+        )
+        deeplink = build_deeplink(context.bot.username, short_id)
+        await msg.reply_text("✅ Movie post တင်ပြီးပါပြီ!")
+        await msg.reply_text(f"🔗 Deeplink: {deeplink}")
+
+
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -953,55 +1003,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"🔗 Deeplink: {deeplink}")
         return
 
-    if getattr(msg, "media_group_id", None):
-        await _queue_album(context, msg, _publish_album)
-        return
-
-    try:
-        media_info = None
-        if msg.video:
-            media = msg.video
-            media_type = "video"
-        elif msg.document:
-            media = msg.document
-            media_type = "document"
-        else:
-            media = msg.photo[-1]
-            media_type = "photo"
-
-        name = getattr(media, "file_name", None) or ""
-        title = await make_movie_title(name, raw_caption)
-        media_info = await _forward_media(context, media, media_type, title)
-
-        if media_info:
-            media_type, new_file_id, file_size, filename = media_info
-            short_id = store_file(
-                new_file_id,
-                media_type,
-                caption=title,
-                filename=filename,
-                file_size=file_size,
-            )
-            deeplink = build_deeplink(context.bot.username, short_id)
-            await msg.reply_text("✅ Movie post တင်ပြီးပါပြီ!")
-            await msg.reply_text(f"🔗 Deeplink: {deeplink}")
-            return
-
-        if title:
-            short_id = store_file("", "text", caption=title)
-            deeplink = build_deeplink(context.bot.username, short_id)
-            for chat_id in POST_CHANNEL_IDS:
-                await run_with_retry(
-                    lambda chat_id=chat_id: context.bot.send_message(
-                        chat_id=chat_id, text=title
-                    )
-                )
-            await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
-            await msg.reply_text(f"🔗 Deeplink: {deeplink}")
-    except Exception as e:
-        print(f"Error posting forwarded (type={msg.video and 'video' or msg.document and 'document' or msg.photo and 'photo' or 'text'}): {e}")
-        print(traceback.format_exc())
-        await msg.reply_text("❌ Post တင်ရာမှာ error ဖြစ်နေပါတယ်။")
+    _enqueue_media(context, msg, forwarded=True)
 
 
 async def _forward_media(context, media, media_type, caption):
