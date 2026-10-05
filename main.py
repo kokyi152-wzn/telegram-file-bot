@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -28,11 +28,11 @@ from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
-    HTTPXRequest,
     MessageHandler,
     filters,
     ContextTypes,
 )
+from telegram.request import HTTPXRequest
 
 load_dotenv()
 
@@ -314,7 +314,7 @@ def store_file(
         "caption": caption or "",
         "filename": filename,
         "file_size": file_size,
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(timezone.utc),
     }
     for _ in range(5):
         _id = generate_id()
@@ -331,7 +331,7 @@ def store_album(items, caption: str = "") -> str:
         "media_type": "album",
         "caption": caption or "",
         "items": items,
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(timezone.utc),
     }
     for _ in range(5):
         _id = generate_id()
@@ -1227,12 +1227,12 @@ def main():
             print(f"Unexpected error stopped polling ({e}). Restarting in 10s...")
 
         # Recreate the event loop for each restart (the old loop may be closed).
-        try:
-            app.shutdown()
-        except Exception:
-            pass
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(app.shutdown())
+        except Exception:
+            pass
         time.sleep(restart_delay)
 
 
