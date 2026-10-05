@@ -28,6 +28,7 @@ from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
+    HTTPXRequest,
     MessageHandler,
     filters,
     ContextTypes,
@@ -236,6 +237,63 @@ async def run_with_retry(coro_factory, max_retries: int = 12, base_pace: float =
             retries += 1
             if retries >= max_retries:
                 raise
+
+
+DUPLICATE_SCAN_LIMIT = 8
+
+
+def _file_id_of_message(msg):
+    """Pull the file_id back out of an already-posted channel message."""
+    if not msg:
+        return None
+    if msg.video:
+        return msg.video.file_id
+    if msg.document:
+        return msg.document.file_id
+    if msg.photo:
+        return msg.photo[-1].file_id
+    return None
+
+
+async def _find_existing_post(bot, chat_id, media, limit: int = DUPLICATE_SCAN_LIMIT):
+    """Return a recent channel message that already carries this exact file.
+
+    Telegram often accepts the upload but the response times out. We then
+    retry and post a SECOND copy, so before any retry we look for the file
+    (file_unique_id is stable across re-uploads) already sitting in the channel.
+    """
+    unique_id = getattr(media, "file_unique_id", None)
+    if not unique_id:
+        return None
+    try:
+        async for msg in bot.get_chat_history(chat_id, limit=limit):
+            for candidate in (
+                msg.video,
+                msg.document,
+                *(msg.photo or ()),
+            ):
+                if candidate and getattr(candidate, "file_unique_id", None) == unique_id:
+                    return msg
+    except Exception as e:
+        print(f"Duplicate scan skipped ({e})")
+    return None
+
+
+def _no_duplicate_retry(factory, bot, chat_id, media):
+    """Wrap a send so retries reuse an existing post instead of duplicating it."""
+    attempt = {"n": 0}
+
+    async def runner():
+        attempt["n"] += 1
+        if attempt["n"] > 1:
+            existing = await _find_existing_post(bot, chat_id, media)
+            reused = _file_id_of_message(existing)
+            if reused:
+                print(f"Already in channel {chat_id} — skipping duplicate upload")
+                return reused
+        return await factory()
+
+    return runner
 
 
 def generate_id(length: int = 6) -> str:
@@ -515,6 +573,9 @@ async def _post_album_to_channels(context, buf_items, items, caption):
     others = [i for i in items if i["media_type"] not in ("photo", "video")]
 
     if len(visual) >= 2:
+        lead = next(
+            b for b in buf_items if b["file_id"] == visual[0]["file_id"]
+        )
         for chat_id in POST_CHANNEL_IDS:
             for start in range(0, len(visual), ALBUM_MAX):
                 chunk = visual[start : start + ALBUM_MAX]
@@ -524,8 +585,13 @@ async def _post_album_to_channels(context, buf_items, items, caption):
                 ]
                 try:
                     sent = await run_with_retry(
-                        lambda group=group, chat_id=chat_id: context.bot.send_media_group(
-                            chat_id=chat_id, media=group
+                        _no_duplicate_retry(
+                            lambda group=group, chat_id=chat_id: context.bot.send_media_group(
+                                chat_id=chat_id, media=group
+                            ),
+                            context.bot,
+                            chat_id,
+                            lead["media"],
                         )
                     )
                     first = sent[0]
@@ -919,22 +985,42 @@ async def send_media_to_channel(bot, chat_id, media, media_type, caption, origin
 
     if media_type == "photo":
         return await run_with_retry(
-            lambda: send_by_file_id(bot, chat_id, media, media_type, caption, original_name)
+            _no_duplicate_retry(
+                lambda: send_by_file_id(bot, chat_id, media, media_type, caption, original_name),
+                bot,
+                chat_id,
+                media,
+            )
         )
 
     if file_size is not None and file_size > MAX_REUPLOAD_BYTES:
         return await run_with_retry(
-            lambda: send_by_file_id(bot, chat_id, media, media_type, caption, original_name)
+            _no_duplicate_retry(
+                lambda: send_by_file_id(bot, chat_id, media, media_type, caption, original_name),
+                bot,
+                chat_id,
+                media,
+            )
         )
 
     try:
         return await run_with_retry(
-            lambda: reupload_media(bot, chat_id, media, media_type, caption, original_name)
+            _no_duplicate_retry(
+                lambda: reupload_media(bot, chat_id, media, media_type, caption, original_name),
+                bot,
+                chat_id,
+                media,
+            )
         )
     except Exception as e:
         print(f"Re-upload failed ({e}); sending by file_id instead")
         return await run_with_retry(
-            lambda: send_by_file_id(bot, chat_id, media, media_type, caption, original_name)
+            _no_duplicate_retry(
+                lambda: send_by_file_id(bot, chat_id, media, media_type, caption, original_name),
+                bot,
+                chat_id,
+                media,
+            )
         )
 
 
@@ -1102,7 +1188,19 @@ def main():
     asyncio.set_event_loop(asyncio.new_event_loop())
 
     while True:
-        app = Application.builder().token(BOT_TOKEN).build()
+        app = (
+            Application.builder()
+            .token(BOT_TOKEN)
+            .request(
+                HTTPXRequest(
+                    connect_timeout=30,
+                    read_timeout=120,
+                    write_timeout=120,
+                    pool_timeout=30,
+                )
+            )
+            .build()
+        )
 
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("menu", cmd_menu))
