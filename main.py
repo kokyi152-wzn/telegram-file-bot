@@ -14,7 +14,15 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+    Update,
+)
 from telegram import error as tg_error
 from telegram.ext import (
     Application,
@@ -255,6 +263,23 @@ def store_file(
     raise RuntimeError("Could not generate a unique id")
 
 
+def store_album(items, caption: str = "") -> str:
+    """Store a whole album (group of photos/videos) under one short id."""
+    doc = {
+        "media_type": "album",
+        "caption": caption or "",
+        "items": items,
+        "created_at": datetime.utcnow(),
+    }
+    for _ in range(5):
+        _id = generate_id()
+        if not files_col.find_one({"_id": _id}):
+            doc["_id"] = _id
+            files_col.insert_one(doc)
+            return _id
+    raise RuntimeError("Could not generate a unique id")
+
+
 def build_deeplink(bot_username: str, short_id: str) -> str:
     return f"https://t.me/{bot_username}?start={short_id}"
 
@@ -313,10 +338,267 @@ async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int):
         print(f"Auto-delete failed: {e}")
 
 
+def _input_media(item, caption=None):
+    """Build an InputMedia object for send_media_group."""
+    if item.get("media_type") == "photo":
+        return InputMediaPhoto(media=item["file_id"], caption=caption)
+    if item.get("media_type") == "video":
+        return InputMediaVideo(
+            media=item["file_id"], caption=caption, supports_streaming=True
+        )
+    return InputMediaDocument(
+        media=item["file_id"],
+        caption=caption,
+        filename=clean_filename(item.get("filename")),
+    )
+
+
+def _extract_media(message):
+    if message.video:
+        return "video", message.video
+    if message.document:
+        return "document", message.document
+    if message.photo:
+        return "photo", message.photo[-1]
+    return None, None
+
+
+ALBUM_BUFFERS = {}
+ALBUM_WAIT = 1.5
+ALBUM_MAX = 10
+
+
+async def _queue_album(context, message, on_done):
+    """Buffer every part of a media group, then publish the whole album once."""
+    key = f"{message.chat.id}:{message.media_group_id}"
+    buf = ALBUM_BUFFERS.get(key)
+    if buf is None:
+        buf = {
+            "items": [],
+            "context": context,
+            "message": message,
+            "on_done": on_done,
+            "task": None,
+        }
+        ALBUM_BUFFERS[key] = buf
+
+    media_type, media = _extract_media(message)
+    if media is None:
+        return
+    buf["items"].append(
+        {
+            "media_type": media_type,
+            "media": media,
+            "file_name": getattr(media, "file_name", None) or "",
+            "caption": message.caption or "",
+        }
+    )
+    buf["message"] = message
+
+    if buf["task"] and not buf["task"].done():
+        buf["task"].cancel()
+    buf["task"] = asyncio.create_task(_flush_album(key))
+
+
+async def _flush_album(key):
+    try:
+        await asyncio.sleep(ALBUM_WAIT)
+    except asyncio.CancelledError:
+        return
+    buf = ALBUM_BUFFERS.pop(key, None)
+    if not buf or not buf["items"]:
+        return
+    try:
+        await buf["on_done"](buf)
+    except Exception as e:
+        print(f"Album processing failed: {e}")
+
+
+async def _album_items_from(buf):
+    items = []
+    for it in buf["items"]:
+        title = await make_movie_title(it["file_name"], it["caption"])
+        items.append(
+            {
+                "file_id": it["media"].file_id,
+                "media_type": it["media_type"],
+                "filename": english_file_name(title, it["file_name"]),
+                "title": title,
+                "file_size": getattr(it["media"], "file_size", None),
+            }
+        )
+    return items
+
+
+async def _publish_album_direct(context, buf):
+    """Admin sent an album: store it and reply with ONE deeplink."""
+    message = buf["message"]
+    items = await _album_items_from(buf)
+    caption = next((i["title"] for i in items if i["title"]), "")
+
+    try:
+        short_id = store_album(items, caption=caption)
+    except Exception as e:
+        print(f"Error storing album: {e}")
+        await message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
+        return
+
+    deeplink = build_deeplink(context.bot.username, short_id)
+    await message.reply_text(
+        f"✅ ပုံ/ဖိုင် {len(items)} ခု အုပ်စုလိုက် သိမ်းပြီးပါပြီ\n"
+        f"🔗 Deeplink: {deeplink}"
+    )
+
+
+async def _post_album_to_channels(context, buf_items, items, caption):
+    """Repost an album to every channel, keeping the group layout."""
+    last_file_id = None
+    visual = [i for i in items if i["media_type"] in ("photo", "video")]
+    others = [i for i in items if i["media_type"] not in ("photo", "video")]
+
+    if len(visual) >= 2:
+        for chat_id in POST_CHANNEL_IDS:
+            for start in range(0, len(visual), ALBUM_MAX):
+                chunk = visual[start : start + ALBUM_MAX]
+                group = [
+                    _input_media(item, caption if idx == 0 else None)
+                    for idx, item in enumerate(chunk)
+                ]
+                try:
+                    sent = await run_with_retry(
+                        lambda group=group, chat_id=chat_id: context.bot.send_media_group(
+                            chat_id=chat_id, media=group
+                        )
+                    )
+                    first = sent[0]
+                    last_file_id = (
+                        first.photo[-1].file_id if first.photo else first.video.file_id
+                    )
+                    print(f"Posted album ({len(chunk)} items) to channel {chat_id}")
+                except Exception as e:
+                    print(f"Album post failed for channel {chat_id}: {e}")
+    elif len(visual) == 1:
+        item = visual[0]
+        source = next(b for b in buf_items if b["file_id"] == item["file_id"])
+        for chat_id in POST_CHANNEL_IDS:
+            try:
+                last_file_id = await send_media_to_channel(
+                    context.bot,
+                    chat_id,
+                    source["media"],
+                    item["media_type"],
+                    caption,
+                    item["filename"],
+                )
+            except Exception as e:
+                print(f"Failed to post {item['media_type']} to {chat_id}: {e}")
+
+    for item in others:
+        source = next(b for b in buf_items if b["file_id"] == item["file_id"])
+        for chat_id in POST_CHANNEL_IDS:
+            try:
+                last_file_id = await send_media_to_channel(
+                    context.bot,
+                    chat_id,
+                    source["media"],
+                    item["media_type"],
+                    item["title"],
+                    item["filename"],
+                )
+            except Exception as e:
+                print(f"Failed to post {item['media_type']} to {chat_id}: {e}")
+
+    if not last_file_id:
+        raise RuntimeError("Album could not be posted to any channel")
+    return last_file_id
+
+
+async def _publish_album_forward(context, buf):
+    """Admin forwarded an album: repost the group to channels + deeplink."""
+    message = buf["message"]
+    items = await _album_items_from(buf)
+    caption = next((i["title"] for i in items if i["title"]), "")
+
+    last_file_id = await _post_album_to_channels(context, buf["items"], items, caption)
+
+    short_id = store_album(items, caption=caption)
+    deeplink = build_deeplink(context.bot.username, short_id)
+    await message.reply_text("✅ Movie post တင်ပြီးပါပြီ!")
+    await message.reply_text(f"🔗 Deeplink: {deeplink}")
+
+
+async def _send_album(message, items, caption):
+    """Deliver a stored album back to the user, preserving the group."""
+    sent_messages = []
+    visual = [i for i in items if i.get("media_type") in ("photo", "video")]
+    others = [i for i in items if i.get("media_type") not in ("photo", "video")]
+
+    async def _send_one(item):
+        if item.get("media_type") == "video":
+            return await message.reply_video(
+                video=item["file_id"], caption=caption, supports_streaming=True
+            )
+        if item.get("media_type") == "document":
+            return await message.reply_document(
+                document=item["file_id"],
+                filename=clean_filename(item.get("filename")),
+                caption=caption,
+            )
+        return await message.reply_photo(photo=item["file_id"], caption=caption)
+
+    if len(visual) >= 2:
+        for start in range(0, len(visual), ALBUM_MAX):
+            chunk = visual[start : start + ALBUM_MAX]
+            group = [
+                _input_media(item, caption if idx == 0 else None)
+                for idx, item in enumerate(chunk)
+            ]
+
+            async def _send_group(group=group):
+                return await message.reply_media_group(media=group)
+
+            try:
+                sent_messages.extend(await run_with_retry(_send_group))
+            except Exception as e:
+                print(f"Album delivery failed: {e}")
+    elif len(visual) == 1:
+        try:
+            sent = await run_with_retry(lambda: _send_one(visual[0]))
+            if sent:
+                sent_messages.append(sent)
+        except Exception as e:
+            print(f"Album delivery failed: {e}")
+
+    for item in others:
+        try:
+            sent = await run_with_retry(lambda item=item: _send_one(item))
+            if sent:
+                sent_messages.append(sent)
+        except Exception as e:
+            print(f"Album item delivery failed: {e}")
+
+    if not sent_messages:
+        await message.reply_text(
+            "❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။"
+        )
+        return
+
+    for msg in sent_messages:
+        asyncio.create_task(
+            _delete_after_delay(
+                msg.get_bot(), msg.chat_id, msg.message_id, AUTO_DELETE_SECONDS
+            )
+        )
+
+
 async def send_file_by_doc(message, doc) -> None:
     media_type = doc["media_type"]
     caption = doc.get("caption") or None
     try:
+        if media_type == "album":
+            await _send_album(message, doc.get("items") or [], caption)
+            return
+
         async def _send():
             if media_type == "video":
                 return await message.reply_video(
@@ -436,110 +718,82 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-
-    video = update.message.video
-    file_name = getattr(video, "file_name", None) or ""
-    title = await make_movie_title(file_name, "")
+async def _process_single(context, message, media_type, media):
+    """Store one media file and reply with its deeplink."""
+    file_name = getattr(media, "file_name", None) or ""
+    title = await make_movie_title(file_name, message.caption or "")
+    post_name = english_file_name(title, file_name)
 
     try:
         short_id = store_file(
-            video.file_id,
-            "video",
+            media.file_id,
+            media_type,
             caption=title,
-            filename=file_name or None,
-            file_size=getattr(video, "file_size", None),
+            filename=post_name,
+            file_size=getattr(media, "file_size", None),
         )
     except Exception as e:
-        print(f"Error storing video: {e}")
-        await update.message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
+        print(f"Error storing {media_type}: {e}")
+        await message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
         return
 
     deeplink = build_deeplink(context.bot.username, short_id)
     final_caption = f"{title}\n\n🔗 {deeplink}" if title else f"🔗 {deeplink}"
 
     try:
-        await update.message.reply_video(
-            video=video.file_id,
-            caption=final_caption,
-            supports_streaming=True,
-        )
+        if media_type == "video":
+            await message.reply_video(
+                video=media.file_id,
+                caption=final_caption,
+                supports_streaming=True,
+            )
+        elif media_type == "document":
+            await message.reply_document(
+                document=media.file_id,
+                filename=clean_filename(post_name) if title else None,
+                caption=final_caption,
+            )
+        else:
+            await message.reply_photo(photo=media.file_id, caption=final_caption)
     except Exception as e:
-        print(f"Error sending video: {e}")
-        await update.message.reply_text("❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။")
+        print(f"Error sending {media_type}: {e}")
+        await message.reply_text("❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။")
+
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+
+    message = update.message
+    if getattr(message, "media_group_id", None):
+        await _queue_album(context, message, _publish_album_direct)
+        return
+
+    await _process_single(context, message, "video", message.video)
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
 
-    doc = update.message.document
-    file_name = doc.file_name or ""
-    title = await make_movie_title(file_name, "")
-    post_name = english_file_name(title, file_name)
-
-    try:
-        short_id = store_file(
-            doc.file_id,
-            "document",
-            caption=title,
-            filename=post_name,
-            file_size=doc.file_size,
-        )
-    except Exception as e:
-        print(f"Error storing document: {e}")
-        await update.message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
+    message = update.message
+    if getattr(message, "media_group_id", None):
+        await _queue_album(context, message, _publish_album_direct)
         return
 
-    deeplink = build_deeplink(context.bot.username, short_id)
-    final_caption = f"{title}\n\n🔗 {deeplink}" if title else f"🔗 {deeplink}"
-
-    try:
-        await update.message.reply_document(
-            document=doc.file_id,
-            filename=clean_filename(post_name) if title else None,
-            caption=final_caption,
-        )
-    except Exception as e:
-        print(f"Error sending document: {e}")
-        await update.message.reply_text("❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။")
+    await _process_single(context, message, "document", message.document)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
 
-    photo = update.message.photo[-1]
-    # Bare Telegram photos don't keep the original file name, so fall back to
-    # the caption (cleaned + translated) instead of dropping the title.
-    title = await make_movie_title("", update.message.caption or "")
-
-    try:
-        short_id = store_file(
-            photo.file_id,
-            "photo",
-            caption=title,
-            filename=None,
-            file_size=getattr(photo, "file_size", None),
-        )
-    except Exception as e:
-        print(f"Error storing photo: {e}")
-        await update.message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
+    message = update.message
+    if getattr(message, "media_group_id", None):
+        await _queue_album(context, message, _publish_album_direct)
         return
 
-    deeplink = build_deeplink(context.bot.username, short_id)
-    final_caption = f"{title}\n\n🔗 {deeplink}" if title else f"🔗 {deeplink}"
-
-    try:
-        await update.message.reply_photo(
-            photo=photo.file_id,
-            caption=final_caption,
-        )
-    except Exception as e:
-        print(f"Error sending photo: {e}")
-        await update.message.reply_text("❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။")
+    await _process_single(context, message, "photo", message.photo[-1])
 
 
 MAX_REUPLOAD_BYTES = 45 * 1024 * 1024  # Bot API InputFile upload limit = 50MB; keep 5MB margin
@@ -698,6 +952,10 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
         await msg.reply_text(f"🔗 Deeplink: {deeplink}")
+        return
+
+    if getattr(msg, "media_group_id", None):
+        await _queue_album(context, msg, _publish_album_forward)
         return
 
     try:
