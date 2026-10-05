@@ -528,11 +528,17 @@ async def _media_worker():
 
 
 async def _album_items_from(buf):
+    """Build post items for an album, keeping the live Telegram media object.
+
+    The media object is only needed while posting; _publish_album strips it
+    before storing so Mongo never sees an unserialisable value.
+    """
     items = []
     for it in buf["items"]:
         title = await make_movie_title(it["file_name"], it["caption"])
         items.append(
             {
+                "media": it["media"],
                 "file_id": it["media"].file_id,
                 "media_type": it["media_type"],
                 "filename": english_file_name(title, it["file_name"]),
@@ -550,10 +556,13 @@ async def _publish_album(context, buf):
     items = await _album_items_from(buf)
     caption = next((i["title"] for i in items if i["title"]), "")
 
-    await _post_album_to_channels(context, buf["items"], items, caption)
+    await _post_album_to_channels(context, items, caption)
 
     try:
-        short_id = store_album(items, caption=caption)
+        storeable = [
+            {k: v for k, v in i.items() if k != "media"} for i in items
+        ]
+        short_id = store_album(storeable, caption=caption)
     except Exception as e:
         print(f"Error storing album: {e}")
         await message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
@@ -566,16 +575,14 @@ async def _publish_album(context, buf):
     )
 
 
-async def _post_album_to_channels(context, buf_items, items, caption):
+async def _post_album_to_channels(context, items, caption):
     """Repost an album to every channel, keeping the group layout."""
     last_file_id = None
     visual = [i for i in items if i["media_type"] in ("photo", "video")]
     others = [i for i in items if i["media_type"] not in ("photo", "video")]
 
     if len(visual) >= 2:
-        lead = next(
-            b for b in buf_items if b["file_id"] == visual[0]["file_id"]
-        )
+        lead = visual[0]
         for chat_id in POST_CHANNEL_IDS:
             for start in range(0, len(visual), ALBUM_MAX):
                 chunk = visual[start : start + ALBUM_MAX]
@@ -603,13 +610,12 @@ async def _post_album_to_channels(context, buf_items, items, caption):
                     print(f"Album post failed for channel {chat_id}: {e}")
     elif len(visual) == 1:
         item = visual[0]
-        source = next(b for b in buf_items if b["file_id"] == item["file_id"])
         for chat_id in POST_CHANNEL_IDS:
             try:
                 last_file_id = await send_media_to_channel(
                     context.bot,
                     chat_id,
-                    source["media"],
+                    item["media"],
                     item["media_type"],
                     caption,
                     item["filename"],
@@ -618,13 +624,12 @@ async def _post_album_to_channels(context, buf_items, items, caption):
                 print(f"Failed to post {item['media_type']} to {chat_id}: {e}")
 
     for item in others:
-        source = next(b for b in buf_items if b["file_id"] == item["file_id"])
         for chat_id in POST_CHANNEL_IDS:
             try:
                 last_file_id = await send_media_to_channel(
                     context.bot,
                     chat_id,
-                    source["media"],
+                    item["media"],
                     item["media_type"],
                     item["title"],
                     item["filename"],
