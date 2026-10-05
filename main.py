@@ -41,7 +41,11 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 # CHANNEL_IDS (comma-separated) is the master list of channels to post to.
 # Falls back to the legacy CHANNEL_ID so old configs keep working.
 CHANNEL_IDS = [int(x.strip()) for x in os.getenv("CHANNEL_IDS", "").split(",") if x.strip()]
-POST_CHANNEL_IDS = CHANNEL_IDS or ([int(CHANNEL_ID)] if CHANNEL_ID else [])
+_raw_channel_ids = CHANNEL_IDS or ([int(CHANNEL_ID)] if CHANNEL_ID else [])
+# De-duplicate: the same chat_id listed twice would post every message twice.
+POST_CHANNEL_IDS = list(dict.fromkeys(_raw_channel_ids))
+if POST_CHANNEL_IDS:
+    print(f"Posting to channels: {POST_CHANNEL_IDS}")
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "telegram_bot")
 
@@ -1014,12 +1018,18 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not post:
         return
 
+    # Never repost back into the channel the post came from — that would make
+    # every message appear twice in the same channel.
+    targets = [c for c in POST_CHANNEL_IDS if c != post.chat_id]
+    if not targets:
+        return
+
     text = remove_links_from_text(post.text or post.caption or "")
     text = await translate_to_myanmar(text)
 
     try:
         if post.video:
-            for chat_id in POST_CHANNEL_IDS:
+            for chat_id in targets:
                 await context.bot.send_video(
                     chat_id=chat_id,
                     video=post.video.file_id,
@@ -1027,14 +1037,14 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
                     supports_streaming=True,
                 )
         elif post.document:
-            for chat_id in POST_CHANNEL_IDS:
+            for chat_id in targets:
                 await context.bot.send_document(
                     chat_id=chat_id,
                     document=post.document.file_id,
                     caption=text or None,
                 )
         elif post.photo:
-            for chat_id in POST_CHANNEL_IDS:
+            for chat_id in targets:
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=post.photo[-1].file_id,
