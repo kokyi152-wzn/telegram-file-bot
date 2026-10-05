@@ -130,7 +130,7 @@ async def _translate_text(text: str, target_lang: str) -> str:
                 ):
                     return translated.strip()
     except Exception as e:
-        print(f"MyMemory translation failed ({e}) — trying Google")
+        print(f"MyMemory translation failed ({e}) â€” trying Google")
 
     params = {
         "client": "gtx",
@@ -151,7 +151,7 @@ async def _translate_text(text: str, target_lang: str) -> str:
         translated = "".join(parts).strip()
         return translated if translated else text
     except Exception as e:
-        print(f"Google translation failed ({e}) — using original text")
+        print(f"Google translation failed ({e}) â€” using original text")
         return text
 
 
@@ -220,14 +220,14 @@ async def run_with_retry(coro_factory, max_retries: int = 12, base_pace: float =
             return await coro_factory()
         except tg_error.RetryAfter as e:
             wait = max(1, getattr(e, "retry_after", 1)) + 2
-            print(f"Rate limited — waiting {wait}s (try {retries + 1}/{max_retries})")
+            print(f"Rate limited â€” waiting {wait}s (try {retries + 1}/{max_retries})")
             await asyncio.sleep(wait)
             retries += 1
             if retries >= max_retries:
                 raise
         except (tg_error.TimedOut, tg_error.NetworkError) as e:
             wait = min(2 ** retries, 30) + 2
-            print(f"Network error ({e}) — retrying in {wait}s (try {retries + 1}/{max_retries})")
+            print(f"Network error ({e}) â€” retrying in {wait}s (try {retries + 1}/{max_retries})")
             await asyncio.sleep(wait)
             retries += 1
             if retries >= max_retries:
@@ -286,9 +286,9 @@ def build_deeplink(bot_username: str, short_id: str) -> str:
 
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton("📊 ဖိုင်စာရင်း", callback_data="menu_stats")],
-        [InlineKeyboardButton("📁 ဖိုင်ပို့နည်း", callback_data="menu_add")],
-        [InlineKeyboardButton("ℹ️ Bot အကြောင်း", callback_data="menu_help")],
+        [InlineKeyboardButton("ðŸ“Š á€–á€­á€¯á€„á€ºá€…á€¬á€›á€„á€ºá€¸", callback_data="menu_stats")],
+        [InlineKeyboardButton("ðŸ“ á€–á€­á€¯á€„á€ºá€•á€­á€¯á€·á€”á€Šá€ºá€¸", callback_data="menu_add")],
+        [InlineKeyboardButton("â„¹ï¸ Bot á€¡á€€á€¼á€±á€¬á€„á€ºá€¸", callback_data="menu_help")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -308,7 +308,7 @@ def clean_filename(filename: str, fallback_ext: str = "") -> str:
 def english_file_name(title: str, original_name: str) -> str:
     """English-only file name for channel posts (keeps the original extension).
 
-    'English (မြန်မာ)' -> 'English' + original extension, so the download
+    'English (á€™á€¼á€”á€ºá€™á€¬)' -> 'English' + original extension, so the download
     name on the channel is English even when the source file was Chinese.
     """
     ext = Path(original_name or "").suffix
@@ -332,7 +332,7 @@ async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int):
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
         print(f"Deleted deeplink delivery {message_id} after {delay}s")
     except tg_error.BadRequest as e:
-        # Message already deleted / too old to delete — that's fine.
+        # Message already deleted / too old to delete â€” that's fine.
         print(f"Auto-delete skipped ({e})")
     except Exception as e:
         print(f"Auto-delete failed: {e}")
@@ -409,9 +409,15 @@ async def _flush_album(key):
     if not buf or not buf["items"]:
         return
     try:
-        await buf["on_done"](buf)
+        await buf["on_done"](buf["context"], buf)
     except Exception as e:
         print(f"Album processing failed: {e}")
+        try:
+            await buf["message"].reply_text(
+                f"âŒ Album á€á€„á€ºá€›á€¬á€™á€¾á€¬ error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹\n{e}"
+            )
+        except Exception:
+            pass
 
 
 async def _album_items_from(buf):
@@ -430,23 +436,26 @@ async def _album_items_from(buf):
     return items
 
 
-async def _publish_album_direct(context, buf):
-    """Admin sent an album: store it and reply with ONE deeplink."""
+async def _publish_album(context, buf):
+    """Album from the admin (sent or forwarded): repost the whole group to every
+    channel as an album, then hand out ONE deeplink for the entire group."""
     message = buf["message"]
     items = await _album_items_from(buf)
     caption = next((i["title"] for i in items if i["title"]), "")
+
+    await _post_album_to_channels(context, buf["items"], items, caption)
 
     try:
         short_id = store_album(items, caption=caption)
     except Exception as e:
         print(f"Error storing album: {e}")
-        await message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
+        await message.reply_text("âŒ Database error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹")
         return
 
     deeplink = build_deeplink(context.bot.username, short_id)
     await message.reply_text(
-        f"✅ ပုံ/ဖိုင် {len(items)} ခု အုပ်စုလိုက် သိမ်းပြီးပါပြီ\n"
-        f"🔗 Deeplink: {deeplink}"
+        f"âœ… Post {len(items)} á€á€¯ á€¡á€¯á€•á€ºá€…á€¯á€œá€­á€¯á€€á€º á€á€„á€ºá€•á€¼á€®á€¸á€•á€«á€•á€¼á€®!\n"
+        f"ðŸ”— Deeplink: {deeplink}"
     )
 
 
@@ -513,20 +522,6 @@ async def _post_album_to_channels(context, buf_items, items, caption):
     return last_file_id
 
 
-async def _publish_album_forward(context, buf):
-    """Admin forwarded an album: repost the group to channels + deeplink."""
-    message = buf["message"]
-    items = await _album_items_from(buf)
-    caption = next((i["title"] for i in items if i["title"]), "")
-
-    last_file_id = await _post_album_to_channels(context, buf["items"], items, caption)
-
-    short_id = store_album(items, caption=caption)
-    deeplink = build_deeplink(context.bot.username, short_id)
-    await message.reply_text("✅ Movie post တင်ပြီးပါပြီ!")
-    await message.reply_text(f"🔗 Deeplink: {deeplink}")
-
-
 async def _send_album(message, items, caption):
     """Deliver a stored album back to the user, preserving the group."""
     sent_messages = []
@@ -579,7 +574,7 @@ async def _send_album(message, items, caption):
 
     if not sent_messages:
         await message.reply_text(
-            "❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။"
+            "âŒ á€–á€­á€¯á€„á€ºá€•á€­á€¯á€·á€›á€¬á€™á€¾á€¬ error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹ á€á€á€€á€¼á€¬á€™á€¾ á€‘á€•á€ºá€€á€¼á€­á€¯á€¸á€…á€¬á€¸á€•á€«á‹"
         )
         return
 
@@ -628,7 +623,7 @@ async def send_file_by_doc(message, doc) -> None:
     except Exception as e:
         print(f"Error sending media to user: {e}")
         await message.reply_text(
-            "❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။"
+            "âŒ á€–á€­á€¯á€„á€ºá€•á€­á€¯á€·á€›á€¬á€™á€¾á€¬ error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹ á€á€á€€á€¼á€¬á€™á€¾ á€‘á€•á€ºá€€á€¼á€­á€¯á€¸á€…á€¬á€¸á€•á€«á‹"
         )
 
 
@@ -639,22 +634,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if doc:
             await send_file_by_doc(update.message, doc)
             return
-        await update.message.reply_text("❌ ဒီဖိုင်ကို ရှာမတွေ့ပါ။ (link မှားနေနိုင်သည်)")
+        await update.message.reply_text("âŒ á€’á€®á€–á€­á€¯á€„á€ºá€€á€­á€¯ á€›á€¾á€¬á€™á€á€½á€±á€·á€•á€«á‹ (link á€™á€¾á€¬á€¸á€”á€±á€”á€­á€¯á€„á€ºá€žá€Šá€º)")
         return
 
     if is_admin(update.effective_user.id):
         await update.message.reply_text(
-            "🎛 Admin ကြိုဆိုပါတယ်!\n\n"
-            "📤 ဖိုင်/Video ပို့ပါ → Deeplink ထုတ်ပေးမယ်\n"
-            "↩️ Forward ပြီး ပို့ပါ → Channel မှာ post တင်ပေးမယ်\n"
-            "👥 ဘယ်သူမဆို ဒီဖိုင်တွေကို ရရှိနိုင်ပါတယ်\n\n"
-            "🎛 Menu ကြည့်ရန်: /menu",
+            "ðŸŽ› Admin á€€á€¼á€­á€¯á€†á€­á€¯á€•á€«á€á€šá€º!\n\n"
+            "ðŸ“¤ á€–á€­á€¯á€„á€º/Video á€•á€­á€¯á€·á€•á€« â†’ Deeplink á€‘á€¯á€á€ºá€•á€±á€¸á€™á€šá€º\n"
+            "â†©ï¸ Forward á€•á€¼á€®á€¸ á€•á€­á€¯á€·á€•á€« â†’ Channel á€™á€¾á€¬ post á€á€„á€ºá€•á€±á€¸á€™á€šá€º\n"
+            "ðŸ‘¥ á€˜á€šá€ºá€žá€°á€™á€†á€­á€¯ á€’á€®á€–á€­á€¯á€„á€ºá€á€½á€±á€€á€­á€¯ á€›á€›á€¾á€­á€”á€­á€¯á€„á€ºá€•á€«á€á€šá€º\n\n"
+            "ðŸŽ› Menu á€€á€¼á€Šá€·á€ºá€›á€”á€º: /menu",
             reply_markup=admin_menu_keyboard(),
         )
     else:
         await update.message.reply_text(
-            "ဒီ bot မှာ ဖိုင်/Video တွေကို deeplink ကနေတစ်ဆင့် ရရှိနိုင်ပါတယ်။\n"
-            "Admin ပေးထားတဲ့ link ကို နှိပ်ပြီး ဖိုင်ကို ရယူပါ။"
+            "á€’á€® bot á€™á€¾á€¬ á€–á€­á€¯á€„á€º/Video á€á€½á€±á€€á€­á€¯ deeplink á€€á€”á€±á€á€…á€ºá€†á€„á€·á€º á€›á€›á€¾á€­á€”á€­á€¯á€„á€ºá€•á€«á€á€šá€ºá‹\n"
+            "Admin á€•á€±á€¸á€‘á€¬á€¸á€á€²á€· link á€€á€­á€¯ á€”á€¾á€­á€•á€ºá€•á€¼á€®á€¸ á€–á€­á€¯á€„á€ºá€€á€­á€¯ á€›á€šá€°á€•á€«á‹"
         )
 
 
@@ -662,7 +657,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     await update.message.reply_text(
-        "🎛 Admin Menu ကြည့်ရန် အောက်က button တွေကို နှိပ်ပါ:",
+        "ðŸŽ› Admin Menu á€€á€¼á€Šá€·á€ºá€›á€”á€º á€¡á€±á€¬á€€á€ºá€€ button á€á€½á€±á€€á€­á€¯ á€”á€¾á€­á€•á€ºá€•á€«:",
         reply_markup=admin_menu_keyboard(),
     )
 
@@ -683,37 +678,37 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photos = files_col.count_documents({"media_type": "photo"})
         texts = files_col.count_documents({"media_type": "text"})
         await query.edit_message_text(
-            "📊 ဖိုင်စာရင်း\n\n"
-            f"🎬 Video: {videos}\n"
-            f"📄 Document: {docs}\n"
-            f"🖼 Photo: {photos}\n"
-            f"📝 Text: {texts}\n\n"
-            f"အားလုံးပေါင်း: {total}\n\n"
-            "🔝 ပြန်ကြည့်ရန် အောက်က Menu ကို သုံးပါ:",
+            "ðŸ“Š á€–á€­á€¯á€„á€ºá€…á€¬á€›á€„á€ºá€¸\n\n"
+            f"ðŸŽ¬ Video: {videos}\n"
+            f"ðŸ“„ Document: {docs}\n"
+            f"ðŸ–¼ Photo: {photos}\n"
+            f"ðŸ“ Text: {texts}\n\n"
+            f"á€¡á€¬á€¸á€œá€¯á€¶á€¸á€•á€±á€«á€„á€ºá€¸: {total}\n\n"
+            "ðŸ” á€•á€¼á€”á€ºá€€á€¼á€Šá€·á€ºá€›á€”á€º á€¡á€±á€¬á€€á€ºá€€ Menu á€€á€­á€¯ á€žá€¯á€¶á€¸á€•á€«:",
             reply_markup=menu,
         )
     elif data == "menu_add":
         await query.edit_message_text(
-            "📁 ဖိုင်ပို့နည်း\n\n"
-            "1️⃣ ဖိုင်/Video ကို ဒီ bot ထဲ ပို့ပါ\n"
-            "   → Deeplink ထုတ်ပေးပါမယ်\n\n"
-            "2️⃣ Forward ပြီး ပို့ပါ\n"
-            "   → Channel မှာ movie post တင်ပြီး Deeplink ထုတ်ပေးပါမယ်\n\n"
-            "⚡ ဖိုင်ကြီးတွေကိုလည်း အဆင်ပြေ ပြေတင်နိုင်ပါတယ်",
+            "ðŸ“ á€–á€­á€¯á€„á€ºá€•á€­á€¯á€·á€”á€Šá€ºá€¸\n\n"
+            "1ï¸âƒ£ á€–á€­á€¯á€„á€º/Video á€€á€­á€¯ á€’á€® bot á€‘á€² á€•á€­á€¯á€·á€•á€«\n"
+            "   â†’ Deeplink á€‘á€¯á€á€ºá€•á€±á€¸á€•á€«á€™á€šá€º\n\n"
+            "2ï¸âƒ£ Forward á€•á€¼á€®á€¸ á€•á€­á€¯á€·á€•á€«\n"
+            "   â†’ Channel á€™á€¾á€¬ movie post á€á€„á€ºá€•á€¼á€®á€¸ Deeplink á€‘á€¯á€á€ºá€•á€±á€¸á€•á€«á€™á€šá€º\n\n"
+            "âš¡ á€–á€­á€¯á€„á€ºá€€á€¼á€®á€¸á€á€½á€±á€€á€­á€¯á€œá€Šá€ºá€¸ á€¡á€†á€„á€ºá€•á€¼á€± á€•á€¼á€±á€á€„á€ºá€”á€­á€¯á€„á€ºá€•á€«á€á€šá€º",
             reply_markup=menu,
         )
     elif data == "menu_help":
         await query.edit_message_text(
-            "ℹ️ Bot အကြောင်း\n\n"
-            "• Admin ပို့တဲ့ဖိုင် → Deeplink ထုတ်ပေး\n"
-            "• Deeplink နှိပ်သူ → ဖိုင် ရရှိမယ်\n"
-            "• Forward လုပ်ထားတဲ့ post → Channel မှာ တင်ပေး\n"
-            "• ဖိုင်နာမည်များကို မူရင်းအတိုင်း ထားပေး",
+            "â„¹ï¸ Bot á€¡á€€á€¼á€±á€¬á€„á€ºá€¸\n\n"
+            "â€¢ Admin á€•á€­á€¯á€·á€á€²á€·á€–á€­á€¯á€„á€º â†’ Deeplink á€‘á€¯á€á€ºá€•á€±á€¸\n"
+            "â€¢ Deeplink á€”á€¾á€­á€•á€ºá€žá€° â†’ á€–á€­á€¯á€„á€º á€›á€›á€¾á€­á€™á€šá€º\n"
+            "â€¢ Forward á€œá€¯á€•á€ºá€‘á€¬á€¸á€á€²á€· post â†’ Channel á€™á€¾á€¬ á€á€„á€ºá€•á€±á€¸\n"
+            "â€¢ á€–á€­á€¯á€„á€ºá€”á€¬á€™á€Šá€ºá€™á€»á€¬á€¸á€€á€­á€¯ á€™á€°á€›á€„á€ºá€¸á€¡á€á€­á€¯á€„á€ºá€¸ á€‘á€¬á€¸á€•á€±á€¸",
             reply_markup=menu,
         )
     else:
         await query.edit_message_text(
-            "🎛 Admin Menu ကြည့်ရန် အောက်က button တွေကို နှိပ်ပါ:",
+            "ðŸŽ› Admin Menu á€€á€¼á€Šá€·á€ºá€›á€”á€º á€¡á€±á€¬á€€á€ºá€€ button á€á€½á€±á€€á€­á€¯ á€”á€¾á€­á€•á€ºá€•á€«:",
             reply_markup=menu,
         )
 
@@ -734,11 +729,11 @@ async def _process_single(context, message, media_type, media):
         )
     except Exception as e:
         print(f"Error storing {media_type}: {e}")
-        await message.reply_text("❌ Database error ဖြစ်နေပါတယ်။")
+        await message.reply_text("âŒ Database error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹")
         return
 
     deeplink = build_deeplink(context.bot.username, short_id)
-    final_caption = f"{title}\n\n🔗 {deeplink}" if title else f"🔗 {deeplink}"
+    final_caption = f"{title}\n\nðŸ”— {deeplink}" if title else f"ðŸ”— {deeplink}"
 
     try:
         if media_type == "video":
@@ -757,7 +752,7 @@ async def _process_single(context, message, media_type, media):
             await message.reply_photo(photo=media.file_id, caption=final_caption)
     except Exception as e:
         print(f"Error sending {media_type}: {e}")
-        await message.reply_text("❌ ဖိုင်ပို့ရာမှာ error ဖြစ်နေပါတယ်။ ခဏကြာမှ ထပ်ကြိုးစားပါ။")
+        await message.reply_text("âŒ á€–á€­á€¯á€„á€ºá€•á€­á€¯á€·á€›á€¬á€™á€¾á€¬ error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹ á€á€á€€á€¼á€¬á€™á€¾ á€‘á€•á€ºá€€á€¼á€­á€¯á€¸á€…á€¬á€¸á€•á€«á‹")
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -766,7 +761,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = update.message
     if getattr(message, "media_group_id", None):
-        await _queue_album(context, message, _publish_album_direct)
+        await _queue_album(context, message, _publish_album)
         return
 
     await _process_single(context, message, "video", message.video)
@@ -778,7 +773,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = update.message
     if getattr(message, "media_group_id", None):
-        await _queue_album(context, message, _publish_album_direct)
+        await _queue_album(context, message, _publish_album)
         return
 
     await _process_single(context, message, "document", message.document)
@@ -790,7 +785,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = update.message
     if getattr(message, "media_group_id", None):
-        await _queue_album(context, message, _publish_album_direct)
+        await _queue_album(context, message, _publish_album)
         return
 
     await _process_single(context, message, "photo", message.photo[-1])
@@ -950,12 +945,12 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=chat_id, text=caption
                 )
             )
-        await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
-        await msg.reply_text(f"🔗 Deeplink: {deeplink}")
+        await msg.reply_text("âœ… Post á€á€„á€ºá€•á€¼á€®á€¸á€•á€«á€•á€¼á€®!")
+        await msg.reply_text(f"ðŸ”— Deeplink: {deeplink}")
         return
 
     if getattr(msg, "media_group_id", None):
-        await _queue_album(context, msg, _publish_album_forward)
+        await _queue_album(context, msg, _publish_album)
         return
 
     try:
@@ -984,8 +979,8 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_size=file_size,
             )
             deeplink = build_deeplink(context.bot.username, short_id)
-            await msg.reply_text("✅ Movie post တင်ပြီးပါပြီ!")
-            await msg.reply_text(f"🔗 Deeplink: {deeplink}")
+            await msg.reply_text("âœ… Movie post á€á€„á€ºá€•á€¼á€®á€¸á€•á€«á€•á€¼á€®!")
+            await msg.reply_text(f"ðŸ”— Deeplink: {deeplink}")
             return
 
         if title:
@@ -997,12 +992,12 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=chat_id, text=title
                     )
                 )
-            await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
-            await msg.reply_text(f"🔗 Deeplink: {deeplink}")
+            await msg.reply_text("âœ… Post á€á€„á€ºá€•á€¼á€®á€¸á€•á€«á€•á€¼á€®!")
+            await msg.reply_text(f"ðŸ”— Deeplink: {deeplink}")
     except Exception as e:
         print(f"Error posting forwarded (type={msg.video and 'video' or msg.document and 'document' or msg.photo and 'photo' or 'text'}): {e}")
         print(traceback.format_exc())
-        await msg.reply_text("❌ Post တင်ရာမှာ error ဖြစ်နေပါတယ်။")
+        await msg.reply_text("âŒ Post á€á€„á€ºá€›á€¬á€™á€¾á€¬ error á€–á€¼á€…á€ºá€”á€±á€•á€«á€á€šá€ºá‹")
 
 
 async def _forward_media(context, media, media_type, caption):
