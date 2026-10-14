@@ -766,11 +766,44 @@ async def _publish_album(context, buf):
     )
 
 
+def _first_file_id(sent, fallback_media):
+    """Best-effort file_id from a send_media_group result.
+
+    On a duplicate-retry the call may return a bare file_id string instead of
+    the list of Telegram messages, so both shapes are handled.
+    """
+    if isinstance(sent, str):
+        return sent
+    if isinstance(sent, list) and sent:
+        first = sent[0]
+        attachment = first.photo or first.video or first.document
+        if attachment is not None:
+            return (attachment[-1] if isinstance(attachment, (list, tuple)) else attachment).file_id
+    return getattr(fallback_media, "file_id", None)
+
+
 async def _post_album_to_channels(context, items, caption):
-    """Repost an album to every channel, keeping the group layout."""
+    """Repost an album to every channel, keeping the group layout.
+
+    Falls back to posting each item on its own if the media group is rejected,
+    so a single bad part never loses the whole album.
+    """
+    if not POST_CHANNEL_IDS:
+        raise RuntimeError("No target channel configured (set CHANNEL_IDS or CHANNEL_ID)")
+
     last_file_id = None
+    errors = []
     visual = [i for i in items if i["media_type"] in ("photo", "video")]
     others = [i for i in items if i["media_type"] not in ("photo", "video")]
+
+    async def _post_single(chat_id, item):
+        nonlocal last_file_id
+        fid = await send_media_to_channel(
+            context.bot, chat_id, item["media"], item["media_type"],
+            item["title"], item["filename"],
+        )
+        if fid:
+            last_file_id = fid
 
     group_caption = add_channel_footer(caption)
     if len(visual) >= 2:
@@ -778,6 +811,14 @@ async def _post_album_to_channels(context, items, caption):
         for chat_id in POST_CHANNEL_IDS:
             for start in range(0, len(visual), ALBUM_MAX):
                 chunk = visual[start : start + ALBUM_MAX]
+                # A media group needs 2-10 items; a lone remainder goes alone.
+                if len(chunk) < 2:
+                    for item in chunk:
+                        try:
+                            await _post_single(chat_id, item)
+                        except Exception as e:
+                            errors.append(f"{chat_id}: {e}")
+                    continue
                 group = [
                     _input_media(item, group_caption if idx == 0 else None)
                     for idx, item in enumerate(chunk)
@@ -793,44 +834,38 @@ async def _post_album_to_channels(context, items, caption):
                             lead["media"],
                         )
                     )
-                    first = sent[0]
-                    last_file_id = (
-                        first.photo[-1].file_id if first.photo else first.video.file_id
-                    )
+                    fid = _first_file_id(sent, lead["media"])
+                    if fid:
+                        last_file_id = fid
                     print(f"Posted album ({len(chunk)} items) to channel {chat_id}")
                 except Exception as e:
-                    print(f"Album post failed for channel {chat_id}: {e}")
+                    errors.append(f"{chat_id}: {e}")
+                    print(
+                        f"Album post failed for channel {chat_id}: {e}; "
+                        "posting items individually"
+                    )
+                    for item in chunk:
+                        try:
+                            await _post_single(chat_id, item)
+                        except Exception as inner:
+                            errors.append(f"{chat_id}: {inner}")
     elif len(visual) == 1:
-        item = visual[0]
         for chat_id in POST_CHANNEL_IDS:
             try:
-                last_file_id = await send_media_to_channel(
-                    context.bot,
-                    chat_id,
-                    item["media"],
-                    item["media_type"],
-                    caption,
-                    item["filename"],
-                )
+                await _post_single(chat_id, visual[0])
             except Exception as e:
-                print(f"Failed to post {item['media_type']} to {chat_id}: {e}")
+                errors.append(f"{chat_id}: {e}")
 
     for item in others:
         for chat_id in POST_CHANNEL_IDS:
             try:
-                last_file_id = await send_media_to_channel(
-                    context.bot,
-                    chat_id,
-                    item["media"],
-                    item["media_type"],
-                    item["title"],
-                    item["filename"],
-                )
+                await _post_single(chat_id, item)
             except Exception as e:
-                print(f"Failed to post {item['media_type']} to {chat_id}: {e}")
+                errors.append(f"{chat_id}: {e}")
 
     if not last_file_id:
-        raise RuntimeError("Album could not be posted to any channel")
+        detail = "; ".join(errors[-3:]) or "unknown error"
+        raise RuntimeError(f"Album could not be posted to any channel ({detail})")
     return last_file_id
 
 
@@ -1229,6 +1264,7 @@ async def post_to_all_channels(bot, media, media_type, caption, original_name) -
     so the post survives even if the original forward source channel dies.
     """
     last_file_id = None
+    errors = []
     for chat_id in POST_CHANNEL_IDS:
         try:
             last_file_id = await send_media_to_channel(
@@ -1238,8 +1274,10 @@ async def post_to_all_channels(bot, media, media_type, caption, original_name) -
         except Exception as e:
             print(f"Failed to post to channel {chat_id}: {e}")
             print(traceback.format_exc())
+            errors.append(f"{chat_id}: {e}")
     if not last_file_id:
-        raise RuntimeError("Media could not be posted to any channel")
+        detail = "; ".join(errors[-3:]) or "no target channel configured"
+        raise RuntimeError(f"Media could not be posted to any channel ({detail})")
     return last_file_id
 
 
