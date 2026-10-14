@@ -328,6 +328,15 @@ def _clean_title(text: str) -> str:
     return text.strip().strip("._ -")
 
 
+def _first_line(text: str) -> str:
+    """First non-empty line — the title, ignoring any synopsis paragraph."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return ""
+
+
 def _file_stem(name: str) -> str:
     if not name:
         return ""
@@ -344,7 +353,7 @@ async def make_movie_title(file_name: str, caption_fallback: str = "") -> str:
     English, already Myanmar, or mixes both is left unchanged.
     """
     name = _file_stem(file_name)
-    caption = _clean_title(caption_fallback)
+    caption = _clean_title(_first_line(caption_fallback))
     if caption and has_foreign_script(caption) and not has_foreign_script(name):
         name = caption
     if not name:
