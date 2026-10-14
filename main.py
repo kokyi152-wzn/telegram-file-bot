@@ -103,7 +103,9 @@ EMOJI_RE = re.compile(
 
 
 _MYMEMORY_URL = "https://api.mymemory.translated.net/get"
-_GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
+# clients5 is Google's dictionary endpoint. It answers with JSON and is far
+# less prone to the 429 rate-limits that block translate_a/single.
+_GOOGLE_TRANSLATE_URL = "https://clients5.google.com/translate_a/t"
 
 
 CJK_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -209,12 +211,26 @@ def _is_mymemory_error(text: str) -> bool:
     return any(marker in upper for marker in _MYMEMORY_ERROR_MARKERS)
 
 
-async def _translate_text(text: str, target_lang: str) -> str:
-    """Translate text to target_lang (Google auto-detect, MyMemory fallback).
+def _parse_google_translation(data) -> str:
+    """Pull the translated string out of a clients5 Google response.
 
-    Google is tried first because its automatic source detection produces much
-    more natural translations than MyMemory for every language. Falls back to
-    MyMemory, then to the original text, so posting never breaks.
+    Shape for a single query is [["translated text", "detected-lang"]].
+    """
+    if isinstance(data, list) and data:
+        first = data[0]
+        if isinstance(first, list) and first and isinstance(first[0], str):
+            return first[0]
+        if isinstance(first, str):
+            return first
+    if isinstance(data, str):
+        return data
+    return ""
+
+
+async def _translate_text(text: str, target_lang: str) -> str:
+    """Translate text to target_lang (Google, then MyMemory fallback).
+
+    Falls back to the original text on any error so posting never breaks.
     """
     if not text or not text.strip():
         return text
@@ -222,24 +238,23 @@ async def _translate_text(text: str, target_lang: str) -> str:
         return text
 
     params = {
-        "client": "gtx",
+        "client": "dict-chrome-ex",
         "sl": "auto",
         "tl": target_lang,
-        "dt": "t",
         "q": text,
     }
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(_GOOGLE_TRANSLATE_URL, params=params)
+            resp = await client.get(
+                _GOOGLE_TRANSLATE_URL,
+                params=params,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
             resp.raise_for_status()
             data = resp.json()
-        parts = []
-        for seg in (data[0] or []):
-            if seg and seg[0]:
-                parts.append(seg[0])
-        translated = "".join(parts).strip()
-        # Reject a "translation" that still carries the original foreign script.
-        if translated and not (has_other_script(text) and has_other_script(translated)):
+        translated = _parse_google_translation(data).strip()
+        # Only accept a real translation (a pure echo means it did nothing).
+        if translated and translated.lower() != text.strip().lower():
             return translated
     except Exception as e:
         print(f"Google translation failed ({e}) — trying MyMemory")
@@ -260,7 +275,7 @@ async def _translate_text(text: str, target_lang: str) -> str:
                         translated
                         and not data.get("quotaFinished")
                         and not _is_mymemory_error(translated)
-                        and not (has_other_script(text) and has_other_script(translated))
+                        and translated.strip().lower() != text.strip().lower()
                     ):
                         return translated.strip()
         except Exception as e:
@@ -272,14 +287,23 @@ async def translate_to_myanmar(text: str) -> str:
     return await _translate_text(text, "my")
 
 
+EN_LABEL = "🇬🇧 English:"
+MY_LABEL = "🇲🇲 Myanmar:"
+
+
 async def _localize_text(text: str) -> str:
-    """Localize a title or synopsis line.
+    """Localize a title or post text.
 
     Rules requested by the channel owner:
-      * English + Myanmar already present -> leave it untouched.
-      * Only English, or only Myanmar      -> leave it untouched.
-      * Any other language (Chinese, Japanese, Korean, Thai, Cyrillic, ...) ->
-        '<English> (<Myanmar>)'.
+      * Only English, only Myanmar, or English + Myanmar -> leave untouched.
+      * Any other language (Chinese, Japanese, Korean, ...) -> translate once to
+        English and once to Myanmar, then show them labelled::
+
+            🇬🇧 English:
+            <english>
+
+            🇲🇲 Myanmar:
+            (<myanmar>)
     """
     if not text or not text.strip():
         return text
@@ -290,15 +314,14 @@ async def _localize_text(text: str) -> str:
     en = (await _translate_text(text, "en") or text).strip()
     my = (await _translate_text(text, "my") or text).strip()
     if not my or my == en:
-        return en
-    return f"{en} ({my})"
+        return f"{EN_LABEL}\n{en}"
+    return f"{EN_LABEL}\n{en}\n\n{MY_LABEL}\n({my})"
 
 
 def _clean_title(text: str) -> str:
     if not text:
         return ""
     text = remove_links_from_text(text)
-    text = EMOJI_RE.sub(" ", text)
     text = re.sub(r"@\w+", " ", text)
     text = remove_hashtags(text)
     text = re.sub(r"\s{2,}", " ", text)
@@ -308,7 +331,7 @@ def _clean_title(text: str) -> str:
 def _file_stem(name: str) -> str:
     if not name:
         return ""
-    return Path(_clean_title(name)).stem
+    return Path(EMOJI_RE.sub(" ", _clean_title(name))).stem
 
 
 async def make_movie_title(file_name: str, caption_fallback: str = "") -> str:
@@ -316,9 +339,9 @@ async def make_movie_title(file_name: str, caption_fallback: str = "") -> str:
 
     When the caption carries a foreign-script description that the bare file
     name does not (e.g. file 'MILK-284.mp4' with a Chinese title in the
-    caption), the caption is used so it can be translated. A foreign title is
-    posted as '<English> (<Myanmar>)'; text that is already English, already
-    Myanmar, or mixes both is left unchanged.
+    caption), the caption is used so it can be translated. Foreign text is
+    posted as a labelled English + Myanmar translation; text that is already
+    English, already Myanmar, or mixes both is left unchanged.
     """
     name = _file_stem(file_name)
     caption = _clean_title(caption_fallback)
@@ -517,18 +540,36 @@ def clean_filename(filename: str, fallback_ext: str = "") -> str:
     return cleaned
 
 
+def _english_source(title: str) -> str:
+    """First English line of a localized title, used for the download name.
+
+    Handles the labelled '🇬🇧 English: ... / 🇲🇲 Myanmar: (...)' format as well
+    as the legacy 'English (Myanmar)' form.
+    """
+    if not title:
+        return ""
+    if EN_LABEL in title:
+        part = title.split(EN_LABEL, 1)[1]
+        part = part.split(MY_LABEL, 1)[0]
+    else:
+        part = title
+        m = re.match(r"^(.*?)\s*\(", part)
+        if m:
+            part = m.group(1)
+    part = part.strip()
+    return part.splitlines()[0].strip() if part else ""
+
+
 def english_file_name(title: str, original_name: str) -> str:
     """English-only file name for channel posts (keeps the original extension).
 
-    'English (မြန်မာ)' -> 'English' + original extension, so the download
-    name on the channel is English even when the source file was Chinese.
+    '🇬🇧 English: English / 🇲🇲 Myanmar: (မြန်မာ)' -> 'English' + original
+    extension, so the download name on the channel is English even when the
+    source file was Chinese.
     """
     ext = Path(original_name or "").suffix
-    en = title or ""
-    m = re.match(r"^(.*?)\s*\(", en)
-    if m:
-        en = m.group(1).strip()
-    base = _clean_title(en) or Path(en).stem
+    en = _english_source(title)
+    base = _clean_title(EMOJI_RE.sub(" ", en)).strip()
     if not base:
         base = Path(original_name or "movie").stem
     return clean_filename(base, fallback_ext=ext or ".mp4")
