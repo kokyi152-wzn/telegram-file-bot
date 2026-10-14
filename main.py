@@ -476,6 +476,26 @@ def build_deeplink(bot_username: str, short_id: str) -> str:
     return f"https://t.me/{bot_username}?start={short_id}"
 
 
+# Promotional lines appended below the caption/text of EVERY channel post.
+CHANNEL_FOOTER_LINES = (
+    "မြန်မာစာတန်းထိုးဇာတ်ကားကြည့်ရန် - https://t.me/wznmoviescollector",
+    "upload by - https://t.me/everyboyhobby",
+)
+
+
+def add_channel_footer(text: str = "") -> str:
+    """Append the channel promo/credit lines under a post's caption or text.
+
+    Idempotent: if the footer is already present (e.g. the post is re-mirrored)
+    it is returned unchanged so the lines never stack up.
+    """
+    footer = "\n\n".join(CHANNEL_FOOTER_LINES)
+    text = (text or "").strip()
+    if CHANNEL_FOOTER_LINES[-1] in text:
+        return text
+    return f"{text}\n\n{footer}" if text else footer
+
+
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("📊 ဖိုင်စာရင်း", callback_data="menu_stats")],
@@ -711,13 +731,14 @@ async def _post_album_to_channels(context, items, caption):
     visual = [i for i in items if i["media_type"] in ("photo", "video")]
     others = [i for i in items if i["media_type"] not in ("photo", "video")]
 
+    group_caption = add_channel_footer(caption)
     if len(visual) >= 2:
         lead = visual[0]
         for chat_id in POST_CHANNEL_IDS:
             for start in range(0, len(visual), ALBUM_MAX):
                 chunk = visual[start : start + ALBUM_MAX]
                 group = [
-                    _input_media(item, caption if idx == 0 else None)
+                    _input_media(item, group_caption if idx == 0 else None)
                     for idx, item in enumerate(chunk)
                 ]
                 try:
@@ -1116,6 +1137,7 @@ async def reupload_media(bot, chat_id, media, media_type, caption, original_name
 
 async def send_media_to_channel(bot, chat_id, media, media_type, caption, original_name) -> str:
     """Re-upload small files fresh; send big files by file_id; photos by file_id."""
+    caption = add_channel_footer(caption)
     file_size = getattr(media, "file_size", None)
 
     if media_type == "photo":
@@ -1214,10 +1236,11 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         short_id = store_file("", "text", caption=caption)
         deeplink = build_deeplink(context.bot.username, short_id)
+        post_text = add_channel_footer(caption)
         for chat_id in POST_CHANNEL_IDS:
             await run_with_retry(
                 lambda chat_id=chat_id: context.bot.send_message(
-                    chat_id=chat_id, text=caption
+                    chat_id=chat_id, text=post_text
                 )
             )
         await msg.reply_text("✅ Post တင်ပြီးပါပြီ!")
@@ -1249,6 +1272,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     text = remove_links_from_text(post.text or post.caption or "")
     text = await _localize_text(text)
+    text = add_channel_footer(text)
 
     try:
         if post.video:
