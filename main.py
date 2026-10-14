@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -27,6 +27,7 @@ from telegram import error as tg_error
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -38,6 +39,8 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_ID", "").split(",") if x.strip()]
+# Channel owner is ALWAYS notified of channel join/leave events (override via env).
+OWNER_ID = int(os.getenv("OWNER_ID", "1147922719"))
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 # CHANNEL_IDS (comma-separated) is the master list of channels to post to.
 # Falls back to the legacy CHANNEL_ID so old configs keep working.
@@ -1426,6 +1429,103 @@ def start_health_server():
     print(f"Health server listening on port {port}")
 
 
+# ---------- Channel member join/leave notifications ----------
+# Telegram only sends 'chat_member' updates when the bot is an administrator of
+# the chat AND 'chat_member' is in allowed_updates (set in run_polling below).
+# Channel owner time is expected in Myanmar time (UTC+6:30).
+MYANMAR_TZ = timezone(timedelta(hours=6, minutes=30))
+JOINED_STATUSES = ("member", "administrator", "creator", "restricted")
+GONE_STATUSES = ("left", "kicked")
+
+
+def _member_display(user) -> str:
+    name = " ".join(
+        p for p in [getattr(user, "first_name", None), getattr(user, "last_name", None)] if p
+    )
+    if getattr(user, "username", None):
+        return f"{name} (@{user.username})" if name else f"@{user.username}"
+    return name or str(user.id)
+
+
+async def _notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
+    recipients = set(ADMIN_IDS)
+    recipients.add(OWNER_ID)
+    for user_id in recipients:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=text)
+            print(f"Join/leave notice delivered to {user_id}")
+        except tg_error.TelegramError as e:
+            print(
+                f"Could not notify {user_id}: {e} "
+                "(that account must press /start once so the bot can PM it)"
+            )
+
+
+async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Report channel joins/leaves to the owner and every admin."""
+    change = update.chat_member
+    if change is None:
+        return
+
+    chat = change.chat
+    print(
+        f"chat_member: chat={chat.id} ({chat.type}) "
+        f"{change.old_chat_member.status} -> {change.new_chat_member.status}"
+    )
+    if POST_CHANNEL_IDS and chat.id not in POST_CHANNEL_IDS:
+        return
+
+    old_status = change.old_chat_member.status
+    new_status = change.new_chat_member.status
+    joined = old_status in GONE_STATUSES and new_status in JOINED_STATUSES
+    left = new_status in GONE_STATUSES and old_status in JOINED_STATUSES
+    if not (joined or left):
+        return
+
+    member = change.new_chat_member.user if joined else change.old_chat_member.user
+    actor = change.from_user
+    when = change.date.astimezone(MYANMAR_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    lines = ["🟢 ချန်နယ်သို့ ဝင်လာသူ အသစ်" if joined else "🔴 ချန်နယ်မှ ထွက်သွားသူ"]
+    lines.append(f"👤 အမည်: {_member_display(member)}")
+    lines.append(f"🆔 ID: {member.id}")
+    if chat.title:
+        lines.append(f"📢 ချန်နယ်: {chat.title}")
+    lines.append(f"🕐 အချိန်: {when} (MMT)")
+    if actor and actor.id != member.id:
+        lines.append(f"✍️ ဆောင်ရွက်သူ: {_member_display(actor)} (ID: {actor.id})")
+
+    await _notify_owner(context, "\n".join(lines))
+
+
+async def _log_notify_channel_status(bot):
+    """Startup diagnostic: is the bot an admin in each target channel?"""
+    print(f"Join/leave notices go to these accounts: {sorted(set(ADMIN_IDS) | {OWNER_ID})}")
+    if not POST_CHANNEL_IDS:
+        print("No target channels configured (set CHANNEL_IDS or CHANNEL_ID).")
+        return
+    try:
+        me = await bot.get_me()
+    except Exception as e:
+        print(f"Startup self-check failed: {e}")
+        return
+    for chat_id in POST_CHANNEL_IDS:
+        try:
+            member = await bot.get_chat_member(chat_id, me.id)
+            print(f"Notify channel {chat_id}: bot status={member.status}")
+            if member.status not in ("administrator", "creator"):
+                print(
+                    f"Bot is NOT an admin in {chat_id} — Telegram will not send "
+                    "join/leave updates for it."
+                )
+        except Exception as e:
+            print(f"Cannot read channel {chat_id} (bot not an admin?): {e}")
+
+
+async def _startup_diag(application):
+    await _log_notify_channel_status(application.bot)
+
+
 def main():
     start_health_server()
 
@@ -1446,6 +1546,7 @@ def main():
                     pool_timeout=30,
                 )
             )
+            .post_init(_startup_diag)
             .build()
         )
 
@@ -1457,6 +1558,7 @@ def main():
         app.add_handler(MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo))
         app.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
         app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
+        app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
         app.add_error_handler(on_bot_error)
 
         restart_delay = 10
@@ -1464,7 +1566,12 @@ def main():
             print("Bot is running...")
             # drop_pending_updates: never replay stale queued updates after a restart,
             # otherwise a huge flood backlog reprocesses and re-triggers rate limits.
-            app.run_polling(drop_pending_updates=True)
+            # allowed_updates MUST include chat_member or Telegram never sends the
+            # channel join/leave notifications (PTB takes it here, not on the builder).
+            app.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+            )
         except tg_error.Conflict as e:
             print(f"Polling stopped by conflict ({e}). Restarting in 15s...")
             restart_delay = 15
