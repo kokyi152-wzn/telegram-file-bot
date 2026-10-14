@@ -86,6 +86,22 @@ def remove_hashtags(text: str) -> str:
     return text.strip()
 
 
+# Emojis / decorative symbols to drop from titles and file names.
+EMOJI_RE = re.compile(
+    "["
+    "\U0001F000-\U0001F2FF"  # enclosed / mahjong / dominoes
+    "\U0001F300-\U0001FAFF"  # emoji, pictographs, symbols
+    "\u2190-\u21FF"          # arrows
+    "\u2300-\u23FF"          # technical
+    "\u2460-\u24FF"          # enclosed alphanumerics
+    "\u25A0-\u27BF"          # geometric shapes, misc symbols, dingbats
+    "\u2B00-\u2BFF"          # misc symbols and arrows
+    "\uFE0F\u200D"           # variation selector / zero-width joiner
+    "\u2122\u00A9\u00AE"     # (tm), (c), (r)
+    "]+"
+)
+
+
 _MYMEMORY_URL = "https://api.mymemory.translated.net/get"
 _GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 
@@ -150,6 +166,11 @@ def has_both_english_and_myanmar(text: str) -> bool:
     return bool(text and LATIN_RE.search(text) and MYANMAR_RE.search(text))
 
 
+def has_foreign_script(text: str) -> bool:
+    """True when text contains Myanmar or any other non-Latin script."""
+    return bool(text and (MYANMAR_RE.search(text) or OTHER_SCRIPT_RE.search(text)))
+
+
 # Best-effort source language for MyMemory (Google uses sl=auto as fallback).
 _SCRIPT_SOURCE = [
     (re.compile(r"[\u3040-\u30ff]"), "ja"),
@@ -189,37 +210,16 @@ def _is_mymemory_error(text: str) -> bool:
 
 
 async def _translate_text(text: str, target_lang: str) -> str:
-    """Translate text to target_lang (MyMemory free API, Google fallback).
+    """Translate text to target_lang (Google auto-detect, MyMemory fallback).
 
-    Falls back to the original text on any error so posting never breaks.
+    Google is tried first because its automatic source detection produces much
+    more natural translations than MyMemory for every language. Falls back to
+    MyMemory, then to the original text, so posting never breaks.
     """
     if not text or not text.strip():
         return text
     if len(text.strip()) < 3:
         return text
-
-    source_lang = _detect_source_lang(text)
-    # Skip MyMemory when source == target (it would just echo the text back);
-    # Google with sl=auto handles anything MyMemory does not know.
-    if source_lang and source_lang.lower() != (target_lang or "").lower():
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                mymemory = await client.get(
-                    _MYMEMORY_URL,
-                    params={"q": text, "langpair": f"{source_lang}|{target_lang}"},
-                )
-                if mymemory.status_code == 200:
-                    data = mymemory.json()
-                    translated = (data.get("responseData") or {}).get("translatedText", "")
-                    if (
-                        translated
-                        and not data.get("quotaFinished")
-                        and not _is_mymemory_error(translated)
-                        and not (has_other_script(text) and has_other_script(translated))
-                    ):
-                        return translated.strip()
-        except Exception as e:
-            print(f"MyMemory translation failed ({e}) — trying Google")
 
     params = {
         "client": "gtx",
@@ -238,10 +238,34 @@ async def _translate_text(text: str, target_lang: str) -> str:
             if seg and seg[0]:
                 parts.append(seg[0])
         translated = "".join(parts).strip()
-        return translated if translated else text
+        # Reject a "translation" that still carries the original foreign script.
+        if translated and not (has_other_script(text) and has_other_script(translated)):
+            return translated
     except Exception as e:
-        print(f"Google translation failed ({e}) — using original text")
-        return text
+        print(f"Google translation failed ({e}) — trying MyMemory")
+
+    # Fallback: MyMemory.
+    source_lang = _detect_source_lang(text)
+    if source_lang and source_lang.lower() != (target_lang or "").lower():
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                mymemory = await client.get(
+                    _MYMEMORY_URL,
+                    params={"q": text, "langpair": f"{source_lang}|{target_lang}"},
+                )
+                if mymemory.status_code == 200:
+                    data = mymemory.json()
+                    translated = (data.get("responseData") or {}).get("translatedText", "")
+                    if (
+                        translated
+                        and not data.get("quotaFinished")
+                        and not _is_mymemory_error(translated)
+                        and not (has_other_script(text) and has_other_script(translated))
+                    ):
+                        return translated.strip()
+        except Exception as e:
+            print(f"MyMemory translation failed ({e}) — using original text")
+    return text
 
 
 async def translate_to_myanmar(text: str) -> str:
@@ -274,6 +298,7 @@ def _clean_title(text: str) -> str:
     if not text:
         return ""
     text = remove_links_from_text(text)
+    text = EMOJI_RE.sub(" ", text)
     text = re.sub(r"@\w+", " ", text)
     text = remove_hashtags(text)
     text = re.sub(r"\s{2,}", " ", text)
@@ -287,15 +312,20 @@ def _file_stem(name: str) -> str:
 
 
 async def make_movie_title(file_name: str, caption_fallback: str = "") -> str:
-    """Channel title = the file's ORIGINAL name from the computer/drive.
+    """Channel title built from the file name and/or the caption.
 
-    A foreign (non-English, non-Myanmar) name is posted as
-    '<English> (<Myanmar>)'. Names that already contain English and Myanmar,
-    or only English / only Myanmar, are left unchanged.
+    When the caption carries a foreign-script description that the bare file
+    name does not (e.g. file 'MILK-284.mp4' with a Chinese title in the
+    caption), the caption is used so it can be translated. A foreign title is
+    posted as '<English> (<Myanmar>)'; text that is already English, already
+    Myanmar, or mixes both is left unchanged.
     """
     name = _file_stem(file_name)
+    caption = _clean_title(caption_fallback)
+    if caption and has_foreign_script(caption) and not has_foreign_script(name):
+        name = caption
     if not name:
-        name = _clean_title(caption_fallback)
+        name = caption
     if not name:
         return ""
     return await _localize_text(name)
