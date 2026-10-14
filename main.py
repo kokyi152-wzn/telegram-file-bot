@@ -92,9 +92,90 @@ _GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 
 CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
+# Myanmar (Burmese) script: main block + extended blocks.
+MYANMAR_RE = re.compile(r"[\u1000-\u109F\uAA60-\uAA7F\uA9E0-\uA9FF]")
+# Latin letters (used together with Myanmar to detect "already bilingual" text).
+LATIN_RE = re.compile(r"[A-Za-z]")
+# Any non-Latin, non-Myanmar script: Chinese, Japanese, Korean, Thai, Cyrillic,
+# Arabic, Devanagari, ... — everything that should be translated to English.
+OTHER_SCRIPT_RE = re.compile(
+    "["
+    "\u0370-\u03ff"  # Greek
+    "\u0400-\u04ff"  # Cyrillic
+    "\u0530-\u058f"  # Armenian
+    "\u0590-\u05ff"  # Hebrew
+    "\u0600-\u06ff"  # Arabic
+    "\u0750-\u077f"  # Arabic Supplement
+    "\u0900-\u097f"  # Devanagari
+    "\u0980-\u09ff"  # Bengali
+    "\u0a00-\u0a7f"  # Gurmukhi
+    "\u0a80-\u0aff"  # Gujarati
+    "\u0b00-\u0b7f"  # Oriya
+    "\u0b80-\u0bff"  # Tamil
+    "\u0c00-\u0c7f"  # Telugu
+    "\u0c80-\u0cff"  # Kannada
+    "\u0d00-\u0d7f"  # Malayalam
+    "\u0d80-\u0dff"  # Sinhala
+    "\u0e00-\u0e7f"  # Thai
+    "\u0e80-\u0eff"  # Lao
+    "\u0f00-\u0fff"  # Tibetan
+    "\u10a0-\u10ff"  # Georgian
+    "\u1100-\u11ff"  # Hangul Jamo
+    "\u3040-\u30ff"  # Hiragana / Katakana
+    "\u31f0-\u31ff"  # Katakana phonetic extensions
+    "\u3400-\u4dbf"  # CJK Extension A
+    "\u4e00-\u9fff"  # CJK Unified Ideographs
+    "\uac00-\ud7af"  # Hangul syllables
+    "\uf900-\ufaff"  # CJK Compatibility Ideographs
+    "\uff00-\uffef"  # Fullwidth / Halfwidth forms
+    "]"
+)
+
 
 def contains_chinese(text: str) -> bool:
     return bool(text and CJK_RE.search(text))
+
+
+def contains_myanmar(text: str) -> bool:
+    return bool(text and MYANMAR_RE.search(text))
+
+
+def has_other_script(text: str) -> bool:
+    """True when text contains a non-Latin, non-Myanmar script letter."""
+    return bool(text and OTHER_SCRIPT_RE.search(text))
+
+
+def has_both_english_and_myanmar(text: str) -> bool:
+    """True when text already mixes English (Latin) and Myanmar script."""
+    return bool(text and LATIN_RE.search(text) and MYANMAR_RE.search(text))
+
+
+# Best-effort source language for MyMemory (Google uses sl=auto as fallback).
+_SCRIPT_SOURCE = [
+    (re.compile(r"[\u3040-\u30ff]"), "ja"),
+    (re.compile(r"[\uac00-\ud7af\u1100-\u11ff]"), "ko"),
+    (re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]"), "zh-CN"),
+    (re.compile(r"[\u0e00-\u0e7f]"), "th"),
+    (re.compile(r"[\u0e80-\u0eff]"), "lo"),
+    (re.compile(r"[\u0400-\u04ff]"), "ru"),
+    (re.compile(r"[\u0600-\u06ff\u0750-\u077f]"), "ar"),
+    (re.compile(r"[\u0900-\u097f]"), "hi"),
+    (re.compile(r"[\u0980-\u09ff]"), "bn"),
+    (re.compile(r"[\u0b80-\u0bff]"), "ta"),
+    (re.compile(r"[\u0c00-\u0c7f]"), "te"),
+    (re.compile(r"[\u0590-\u05ff]"), "he"),
+    (re.compile(r"[\u10a0-\u10ff]"), "ka"),
+]
+
+
+def _detect_source_lang(text: str) -> str:
+    """Return a MyMemory-friendly source code for the text (default 'en')."""
+    if not text:
+        return "en"
+    for regex, code in _SCRIPT_SOURCE:
+        if regex.search(text):
+            return code
+    return "en"
 
 
 _MYMEMORY_ERROR_MARKERS = ("LANGPAIR", "INVALID SOURCE", "MYMEMORY WARNING", "UNABLE TO", "NO QUOTA")
@@ -117,25 +198,28 @@ async def _translate_text(text: str, target_lang: str) -> str:
     if len(text.strip()) < 3:
         return text
 
-    source_lang = "zh-CN" if contains_chinese(text) else "en"
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            mymemory = await client.get(
-                _MYMEMORY_URL,
-                params={"q": text, "langpair": f"{source_lang}|{target_lang}"},
-            )
-            if mymemory.status_code == 200:
-                data = mymemory.json()
-                translated = (data.get("responseData") or {}).get("translatedText", "")
-                if (
-                    translated
-                    and not data.get("quotaFinished")
-                    and not _is_mymemory_error(translated)
-                    and not (contains_chinese(text) and contains_chinese(translated))
-                ):
-                    return translated.strip()
-    except Exception as e:
-        print(f"MyMemory translation failed ({e}) — trying Google")
+    source_lang = _detect_source_lang(text)
+    # Skip MyMemory when source == target (it would just echo the text back);
+    # Google with sl=auto handles anything MyMemory does not know.
+    if source_lang and source_lang.lower() != (target_lang or "").lower():
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                mymemory = await client.get(
+                    _MYMEMORY_URL,
+                    params={"q": text, "langpair": f"{source_lang}|{target_lang}"},
+                )
+                if mymemory.status_code == 200:
+                    data = mymemory.json()
+                    translated = (data.get("responseData") or {}).get("translatedText", "")
+                    if (
+                        translated
+                        and not data.get("quotaFinished")
+                        and not _is_mymemory_error(translated)
+                        and not (has_other_script(text) and has_other_script(translated))
+                    ):
+                        return translated.strip()
+        except Exception as e:
+            print(f"MyMemory translation failed ({e}) — trying Google")
 
     params = {
         "client": "gtx",
@@ -164,6 +248,28 @@ async def translate_to_myanmar(text: str) -> str:
     return await _translate_text(text, "my")
 
 
+async def _localize_text(text: str) -> str:
+    """Localize a title or synopsis line.
+
+    Rules requested by the channel owner:
+      * English + Myanmar already present -> leave it untouched.
+      * Only English, or only Myanmar      -> leave it untouched.
+      * Any other language (Chinese, Japanese, Korean, Thai, Cyrillic, ...) ->
+        '<English> (<Myanmar>)'.
+    """
+    if not text or not text.strip():
+        return text
+    if has_both_english_and_myanmar(text):
+        return text
+    if not has_other_script(text):
+        return text
+    en = (await _translate_text(text, "en") or text).strip()
+    my = (await _translate_text(text, "my") or text).strip()
+    if not my or my == en:
+        return en
+    return f"{en} ({my})"
+
+
 def _clean_title(text: str) -> str:
     if not text:
         return ""
@@ -183,22 +289,16 @@ def _file_stem(name: str) -> str:
 async def make_movie_title(file_name: str, caption_fallback: str = "") -> str:
     """Channel title = the file's ORIGINAL name from the computer/drive.
 
-    The Telegram caption is ignored. If the name is Chinese, it is posted as
-    '<English> (<Myanmar>)'. Falls back to the cleaned caption only when the
-    file has no name at all (e.g. bare Telegram photos).
+    A foreign (non-English, non-Myanmar) name is posted as
+    '<English> (<Myanmar>)'. Names that already contain English and Myanmar,
+    or only English / only Myanmar, are left unchanged.
     """
     name = _file_stem(file_name)
     if not name:
         name = _clean_title(caption_fallback)
     if not name:
         return ""
-    if not contains_chinese(name):
-        return name
-    en = (await _translate_text(name, "en") or name).strip()
-    my = (await _translate_text(name, "my") or name).strip()
-    if not my or my == en:
-        return en
-    return f"{en} ({my})"
+    return await _localize_text(name)
 
 
 _CHANNEL_LOCK = asyncio.Lock()
@@ -1079,7 +1179,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     media = msg.video or msg.document or (msg.photo and msg.photo[-1])
     if media is None:
-        caption = await translate_to_myanmar(raw_caption)
+        caption = await _localize_text(raw_caption)
         if not caption:
             return
         short_id = store_file("", "text", caption=caption)
@@ -1118,7 +1218,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     text = remove_links_from_text(post.text or post.caption or "")
-    text = await translate_to_myanmar(text)
+    text = await _localize_text(text)
 
     try:
         if post.video:
