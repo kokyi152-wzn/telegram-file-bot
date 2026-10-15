@@ -50,6 +50,12 @@ _raw_channel_ids = CHANNEL_IDS or ([int(CHANNEL_ID)] if CHANNEL_ID else [])
 POST_CHANNEL_IDS = list(dict.fromkeys(_raw_channel_ids))
 if POST_CHANNEL_IDS:
     print(f"Posting to channels: {POST_CHANNEL_IDS}")
+# Custom thumbnail for every video/document post (branding). Two ways to set it:
+#   THUMBNAIL_FILE_ID = a Telegram file_id of the image (no re-upload per post), OR
+#   THUMBNAIL_PATH    = a local image file the bot can read (default thumbnail.jpg).
+THUMBNAIL_FILE_ID = os.getenv("THUMBNAIL_FILE_ID", "").strip()
+THUMBNAIL_PATH = os.getenv("THUMBNAIL_PATH", "thumbnail.jpg").strip()
+
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "telegram_bot")
 
@@ -603,18 +609,42 @@ async def _delete_after_delay(bot, chat_id: int, message_id: int, delay: int):
         print(f"Auto-delete failed: {e}")
 
 
+def _thumb():
+    """Return a FRESH thumbnail argument for one send call, or None.
+
+    A new object is returned each time because a single InputFile must not be
+    reused across multiple requests.
+    """
+    if THUMBNAIL_FILE_ID:
+        return THUMBNAIL_FILE_ID
+    if THUMBNAIL_PATH:
+        candidates = [THUMBNAIL_PATH]
+        if not os.path.isabs(THUMBNAIL_PATH):
+            candidates.append(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), THUMBNAIL_PATH)
+            )
+        for path in candidates:
+            if os.path.isfile(path):
+                return InputFile(path, filename=os.path.basename(path))
+    return None
+
+
 def _input_media(item, caption=None):
     """Build an InputMedia object for send_media_group."""
     if item.get("media_type") == "photo":
         return InputMediaPhoto(media=item["file_id"], caption=caption)
     if item.get("media_type") == "video":
         return InputMediaVideo(
-            media=item["file_id"], caption=caption, supports_streaming=True
+            media=item["file_id"],
+            caption=caption,
+            supports_streaming=True,
+            thumbnail=_thumb(),
         )
     return InputMediaDocument(
         media=item["file_id"],
         caption=caption,
         filename=clean_filename(item.get("filename")),
+        thumbnail=_thumb(),
     )
 
 
@@ -890,13 +920,17 @@ async def _send_album(message, items, caption):
     async def _send_one(item):
         if item.get("media_type") == "video":
             return await message.reply_video(
-                video=item["file_id"], caption=caption, supports_streaming=True
+                video=item["file_id"],
+                caption=caption,
+                supports_streaming=True,
+                thumbnail=_thumb(),
             )
         if item.get("media_type") == "document":
             return await message.reply_document(
                 document=item["file_id"],
                 filename=clean_filename(item.get("filename")),
                 caption=caption,
+                thumbnail=_thumb(),
             )
         return await message.reply_photo(photo=item["file_id"], caption=caption)
 
@@ -959,12 +993,14 @@ async def send_file_by_doc(message, doc) -> None:
                     video=doc["file_id"],
                     caption=caption,
                     supports_streaming=True,
+                    thumbnail=_thumb(),
                 )
             elif media_type == "document":
                 return await message.reply_document(
                     document=doc["file_id"],
                     filename=clean_filename(doc.get("filename")),
                     caption=caption,
+                    thumbnail=_thumb(),
                 )
             elif media_type == "photo":
                 return await message.reply_photo(photo=doc["file_id"], caption=caption)
@@ -1146,6 +1182,7 @@ async def send_by_file_id(bot, chat_id, media, media_type, caption, original_nam
             video=media.file_id,
             caption=caption or None,
             supports_streaming=True,
+            thumbnail=_thumb(),
         )
         return sent.video.file_id
     elif media_type == "document":
@@ -1154,6 +1191,7 @@ async def send_by_file_id(bot, chat_id, media, media_type, caption, original_nam
             document=media.file_id,
             filename=clean_filename(original_name),
             caption=caption or None,
+            thumbnail=_thumb(),
         )
         return sent.document.file_id
     elif media_type == "photo":
@@ -1197,13 +1235,22 @@ async def reupload_media(bot, chat_id, media, media_type, caption, original_name
 
         clean_name = clean_filename(original_name, fallback_ext=suffix)
 
+        # Custom branding thumbnail wins; otherwise keep the source's own.
+        custom_thumb = _thumb()
+        if custom_thumb is not None:
+            thumb_arg = custom_thumb
+        elif thumb_path:
+            thumb_arg = InputFile(thumb_path)
+        else:
+            thumb_arg = None
+
         if media_type == "video":
             sent = await bot.send_video(
                 chat_id=chat_id,
                 video=InputFile(local_path, filename=clean_name),
                 caption=caption or None,
                 supports_streaming=True,
-                thumbnail=InputFile(thumb_path) if thumb_path else None,
+                thumbnail=thumb_arg,
             )
             return sent.video.file_id
         elif media_type == "document":
@@ -1211,6 +1258,7 @@ async def reupload_media(bot, chat_id, media, media_type, caption, original_name
                 chat_id=chat_id,
                 document=InputFile(local_path, filename=clean_name),
                 caption=caption or None,
+                thumbnail=custom_thumb,
             )
             return sent.document.file_id
         elif media_type == "photo":
