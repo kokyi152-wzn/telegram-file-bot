@@ -1115,6 +1115,8 @@ async def _process_single(context, message, media_type, media):
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user is None:
+        return
     if not is_admin(update.effective_user.id):
         return
 
@@ -1122,6 +1124,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user is None:
+        return
     if not is_admin(update.effective_user.id):
         return
 
@@ -1129,6 +1133,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user is None:
+        return
     if not is_admin(update.effective_user.id):
         return
 
@@ -1576,9 +1582,9 @@ def main():
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("menu", cmd_menu))
         app.add_handler(CallbackQueryHandler(admin_callback))
-        app.add_handler(MessageHandler(filters.VIDEO & ~filters.FORWARDED, handle_video))
-        app.add_handler(MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document))
-        app.add_handler(MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo))
+        app.add_handler(MessageHandler(filters.VIDEO & ~filters.FORWARDED & ~filters.UpdateType.CHANNEL_POST, handle_video))
+        app.add_handler(MessageHandler(filters.Document.ALL & ~filters.FORWARDED & ~filters.UpdateType.CHANNEL_POST, handle_document))
+        app.add_handler(MessageHandler(filters.PHOTO & ~filters.FORWARDED & ~filters.UpdateType.CHANNEL_POST, handle_photo))
         app.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded))
         app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
         app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
