@@ -1526,8 +1526,31 @@ async def _startup_diag(application):
     await _log_notify_channel_status(application.bot)
 
 
+def start_keepalive():
+    """Render free tier က ၁၅ မိနစ် မလှုပ်ရင် အိပ်ပျော်တယ် — ကိုယ့်ကိုယ်ကို နှိုးပေးမယ်.
+
+    ပြင်ပ pinger (UptimeRobot) မလိုအပ်တော့ဘဲ bot က အမြဲနိုးနေမယ်။
+    """
+    url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("SELF_URL")
+    if not url:
+        print("Keepalive skipped (RENDER_EXTERNAL_URL/SELF_URL not set)")
+        return
+
+    def loop():
+        while True:
+            time.sleep(240)
+            try:
+                httpx.get(url.rstrip("/") + "/", timeout=20)
+            except Exception:
+                pass
+
+    threading.Thread(target=loop, daemon=True).start()
+    print(f"Keepalive started for {url}")
+
+
 def main():
     start_health_server()
+    start_keepalive()
 
     # Python 3.12+ no longer auto-creates an event loop; python-telegram-bot 21.6
     # relies on asyncio.get_event_loop() internally, which raises on Python 3.13/3.14.
