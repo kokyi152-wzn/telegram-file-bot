@@ -50,6 +50,11 @@ _raw_channel_ids = CHANNEL_IDS or ([int(CHANNEL_ID)] if CHANNEL_ID else [])
 POST_CHANNEL_IDS = list(dict.fromkeys(_raw_channel_ids))
 if POST_CHANNEL_IDS:
     print(f"Posting to channels: {POST_CHANNEL_IDS}")
+# The backup channel is a destination only. Posts that land there (from this
+# bot or any other bot) must never be mirrored back out to the other channels.
+BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", "0") or 0)
+if BACKUP_CHANNEL_ID:
+    print(f"Backup channel (never mirrored from): {BACKUP_CHANNEL_ID}")
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "telegram_bot")
 
@@ -1359,6 +1364,12 @@ async def _forward_media(context, media, media_type, caption):
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post = update.channel_post
     if not post:
+        return
+
+    # The backup channel only ever receives posts. Mirroring anything out of it
+    # (for example another bot's backup upload) would leak files into the
+    # public channels, so ignore posts that originate there.
+    if BACKUP_CHANNEL_ID and post.chat_id == BACKUP_CHANNEL_ID:
         return
 
     # Never repost back into the channel the post came from — that would make
