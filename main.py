@@ -36,10 +36,11 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 
 try:
-    from link_forwarder import start_link_forwarder
+    from link_forwarder import start_link_forwarder, submit_link
 except Exception as _lf_import_err:
     print(f"[link-forwarder] import failed: {_lf_import_err}")
     start_link_forwarder = None
+    submit_link = None
 
 load_dotenv()
 
@@ -1571,6 +1572,19 @@ def start_keepalive():
     print(f"Keepalive started for {url}")
 
 
+async def handle_post_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner sends a channel post link in the bot DM -> start forwarding."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not is_admin(user.id):
+        return
+    if not chat or chat.type != "private":
+        return
+    text = update.effective_message.text or ""
+    if submit_link and submit_link(text):
+        await update.effective_message.reply_text("Link ရပါပြီ — forward စပါမယ်။")
+
+
 def main():
     start_health_server()
     start_keepalive()
@@ -1601,6 +1615,11 @@ def main():
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("menu", cmd_menu))
         app.add_handler(CallbackQueryHandler(admin_callback))
+        app.add_handler(MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND
+            & ~filters.FORWARDED & ~filters.UpdateType.CHANNEL_POST,
+            handle_post_link,
+        ))
         app.add_handler(MessageHandler(filters.VIDEO & ~filters.FORWARDED & ~filters.UpdateType.CHANNEL_POST, handle_video))
         app.add_handler(MessageHandler(filters.Document.ALL & ~filters.FORWARDED & ~filters.UpdateType.CHANNEL_POST, handle_document))
         app.add_handler(MessageHandler(filters.PHOTO & ~filters.FORWARDED & ~filters.UpdateType.CHANNEL_POST, handle_photo))
