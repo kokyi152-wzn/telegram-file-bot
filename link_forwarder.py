@@ -12,7 +12,7 @@ import os
 import re
 import threading
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.errors import FloodWaitError, RPCError
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageService
@@ -147,16 +147,27 @@ async def _listen():
     print(f"[link-forwarder] user {me.id} -> bot {bot.id} ({BOT_USERNAME})", flush=True)
     fw = _Forwarder(client, bot)
 
-    @client.on(events.NewMessage(chats=bot))
-    async def on_message(event):
-        text = event.message.message or ""
-        if event.message.media and not text:
-            return
-        print(f"[link-forwarder] got: {text[:120]}", flush=True)
-        await fw.submit(text)
-
-    print("[link-forwarder] listening for post links ...", flush=True)
-    await client.run_until_disconnected()
+    # Poll the DM instead of relying on live events (events did not fire
+    # reliably for this account in the Render thread).
+    head = await client.get_messages(bot, limit=1)
+    last_id = head[0].id if head else 0
+    print(f"[link-forwarder] polling bot DM from {last_id} ...", flush=True)
+    while True:
+        await asyncio.sleep(3)
+        try:
+            new = await client.get_messages(bot, min_id=last_id, limit=50)
+            for m in reversed(new):
+                last_id = max(last_id, m.id)
+                text = m.message or ""
+                if m.media and not text:
+                    continue
+                print(f"[link-forwarder] got: {text[:120]}", flush=True)
+                await fw.submit(text)
+        except FloodWaitError as exc:
+            print(f"[link-forwarder] FloodWait {exc.seconds}s", flush=True)
+            await asyncio.sleep(exc.seconds + 3)
+        except Exception as exc:
+            print(f"[link-forwarder] POLL ERROR {type(exc).__name__}: {exc}", flush=True)
 
 
 def start_link_forwarder():
