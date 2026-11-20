@@ -15,7 +15,7 @@ import threading
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, RPCError
 from telethon.sessions import StringSession
-from telethon.tl.types import MessageService
+from telethon.tl.types import MessageMediaPhoto, MessageService
 
 API_ID = int(os.getenv("TG_API_ID") or "31778137")
 API_HASH = os.getenv("TG_API_HASH") or "357247ed45b28459c6600e31cce5b773"
@@ -111,6 +111,11 @@ class _Forwarder:
             if isinstance(m, MessageService):
                 continue
             if not (m.media or (m.message and m.message.strip())):
+                continue
+            # Skip single-photo posts (example: t.me/zsx12345/629).
+            # Album photos (grouped_id) are still kept.
+            if not getattr(m, "grouped_id", None) and isinstance(m.media, MessageMediaPhoto):
+                print(f"[link-forwarder] skip single-photo post {m.id}", flush=True)
                 continue
             gid = getattr(m, "grouped_id", None)
             if gid:
