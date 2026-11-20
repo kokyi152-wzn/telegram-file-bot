@@ -35,6 +35,12 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
+try:
+    from link_forwarder import start_link_forwarder
+except Exception as _lf_import_err:
+    print(f"[link-forwarder] import failed: {_lf_import_err}")
+    start_link_forwarder = None
+
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -1568,6 +1574,8 @@ def start_keepalive():
 def main():
     start_health_server()
     start_keepalive()
+    if start_link_forwarder:
+        start_link_forwarder()
 
     # Python 3.12+ no longer auto-creates an event loop; python-telegram-bot 21.6
     # relies on asyncio.get_event_loop() internally, which raises on Python 3.13/3.14.

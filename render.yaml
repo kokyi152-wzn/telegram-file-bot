@@ -12,3 +12,9 @@ services:
         sync: false
       - key: CHANNEL_ID
         sync: false
+      - key: TG_SESSION
+        sync: false
+      - key: FORWARD_BOT
+        sync: false
+      - key: FORWARD_DELAY
+        sync: false
