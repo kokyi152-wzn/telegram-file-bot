@@ -152,6 +152,15 @@ async def _listen():
     head = await client.get_messages(bot, limit=1)
     last_id = head[0].id if head else 0
     print(f"[link-forwarder] polling bot DM from {last_id} ...", flush=True)
+
+    # Catch up on recent outgoing links that arrived before this deploy
+    # (e.g. links missed while live events were not firing).
+    recent = await client.get_messages(bot, limit=20)
+    for m in reversed(recent):
+        text = m.message or ""
+        if m.out and parse_link(text):
+            print(f"[link-forwarder] catch-up: {text[:120]}", flush=True)
+            await fw.submit(text)
     while True:
         await asyncio.sleep(3)
         try:
