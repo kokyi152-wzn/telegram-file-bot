@@ -40,11 +40,24 @@ def parse_link(text):
     return None
 
 
+async def _ensure_connected(client):
+    """Reconnect the user client if Telegram dropped the connection."""
+    try:
+        if not client.is_connected():
+            print("[link-forwarder] reconnecting ...", flush=True)
+            await client.connect()
+        return True
+    except Exception as exc:
+        print(f"[link-forwarder] RECONNECT FAILED {type(exc).__name__}: {exc}", flush=True)
+        return False
+
+
 class _Forwarder:
     def __init__(self, client, bot):
         self.client = client
         self.bot = bot
         self.queue = asyncio.Queue()
+        self.active = set()
         self.busy = False
 
     async def submit(self, text):
@@ -52,6 +65,10 @@ class _Forwarder:
         if not parsed:
             print("[link-forwarder] no channel post link found, ignoring", flush=True)
             return
+        if parsed in self.active:
+            print(f"[link-forwarder] duplicate link already running: {parsed}", flush=True)
+            return
+        self.active.add(parsed)
         await self.queue.put(parsed)
         print(f"[link-forwarder] queued {parsed}", flush=True)
         if not self.busy:
@@ -66,11 +83,17 @@ class _Forwarder:
                     await self.forward(ref, start)
                 except Exception as exc:
                     print(f"[link-forwarder] ERROR {type(exc).__name__}: {exc}", flush=True)
+                finally:
+                    self.active.discard((ref, start))
+                    self.queue.task_done()
         finally:
             self.busy = False
 
     async def forward(self, ref, start):
         client = self.client
+        if not await _ensure_connected(client):
+            print("[link-forwarder] cannot forward while disconnected", flush=True)
+            return
         try:
             source = await client.get_entity(ref)
         except Exception as exc:
@@ -101,6 +124,11 @@ class _Forwarder:
                 except FloodWaitError as exc:
                     print(f"[link-forwarder] FloodWait {exc.seconds}s", flush=True)
                     await asyncio.sleep(exc.seconds + 3)
+                except ConnectionError:
+                    print("[link-forwarder] connection dropped while forwarding, reconnecting ...", flush=True)
+                    await asyncio.sleep(2)
+                    if not await _ensure_connected(client):
+                        break
                 except RPCError as exc:
                     print(f"[link-forwarder] FAILED {ids}: {exc}", flush=True)
                     break
@@ -176,7 +204,10 @@ async def _listen():
             print(f"[link-forwarder] FloodWait {exc.seconds}s", flush=True)
             await asyncio.sleep(exc.seconds + 3)
         except Exception as exc:
-            print(f"[link-forwarder] POLL ERROR {type(exc).__name__}: {exc}", flush=True)
+            msg = str(exc).replace("\n", " ")[:300]
+            print(f"[link-forwarder] POLL ERROR {type(exc).__name__}: {msg}", flush=True)
+            if not await _ensure_connected(client):
+                await asyncio.sleep(10)
 
 
 def start_link_forwarder():
