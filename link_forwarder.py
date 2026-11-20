@@ -1,11 +1,12 @@
-"""Post-link listener for the user account.
+"""Post-link forwarder for the user account.
 
-When the owner sends a channel post link to this bot's DM, every post from
-that link up to the newest post of the source channel is forwarded back into
-the same DM.  The bot then processes those forwarded posts as usual.
+The bot (python-telegram-bot) delivers post links from its DM to this module
+via submit_link().  Every post from the supplied link up to the newest post of
+the source channel is forwarded back into the same bot DM, then the work stops
+until another link arrives.
 
-Runs in its own thread with its own asyncio loop so it never interferes with
-python-telegram-bot's polling loop.
+Runs in its own daemon thread with its own asyncio loop so it never interferes
+with python-telegram-bot's polling loop.
 """
 import asyncio
 import os
@@ -14,8 +15,21 @@ import threading
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, RPCError
+from telethon.extensions.binaryreader import tlobjects as _tlobjects
 from telethon.sessions import StringSession
+from telethon.tl import types as _tl_types
 from telethon.tl.types import MessageMediaPhoto, MessageService
+
+
+# Telegram still sometimes sends the layer 228-231 `channel` constructor
+# (0xd49f34c6) even when Telethon negotiates a newer layer.  It has the same
+# layout as the current constructor as long as the newer optional flags are
+# unset, so registering it as a subclass keeps those responses readable.
+class _LegacyChannel(_tl_types.Channel):
+    CONSTRUCTOR_ID = 0xD49F34C6
+
+
+_tlobjects.setdefault(_LegacyChannel.CONSTRUCTOR_ID, _LegacyChannel)
 
 API_ID = int(os.getenv("TG_API_ID") or "31778137")
 API_HASH = os.getenv("TG_API_HASH") or "357247ed45b28459c6600e31cce5b773"
@@ -25,6 +39,9 @@ DELAY = float(os.getenv("FORWARD_DELAY", "1.5") or "1.5")
 
 _PRIVATE = re.compile(r"t\.me/c/(\d+)/(\d+)")
 _PUBLIC = re.compile(r"t\.me/([A-Za-z0-9_]+)/(\d+)")
+
+_loop = None
+_forwarder = None
 
 
 def parse_link(text):
@@ -140,8 +157,7 @@ class _Forwarder:
                 continue
             if not (m.media or (m.message and m.message.strip())):
                 continue
-            # Skip single-photo posts (example: t.me/zsx12345/629).
-            # Album photos (grouped_id) are still kept.
+            # Skip single-photo posts. Album photos (grouped_id) are kept.
             if not getattr(m, "grouped_id", None) and isinstance(m.media, MessageMediaPhoto):
                 print(f"[link-forwarder] skip single-photo post {m.id}", flush=True)
                 continue
@@ -160,7 +176,23 @@ class _Forwarder:
         print(f"[link-forwarder] DONE {title}: {sent} messages", flush=True)
 
 
+def submit_link(text):
+    """Thread-safe entry point called from the python-telegram-bot thread."""
+    if not _loop or not _forwarder:
+        print("[link-forwarder] not ready - link ignored", flush=True)
+        return False
+    try:
+        asyncio.run_coroutine_threadsafe(_forwarder.submit(text), _loop)
+        return True
+    except Exception as exc:
+        print(f"[link-forwarder] SUBMIT ERROR {type(exc).__name__}: {exc}", flush=True)
+        return False
+
+
 async def _listen():
+    global _loop, _forwarder
+    _loop = asyncio.get_running_loop()
+
     if not SESSION:
         print("[link-forwarder] TG_SESSION not set - disabled", flush=True)
         return
@@ -172,42 +204,13 @@ async def _listen():
         return
     me = await client.get_me()
     bot = await client.get_entity(BOT_USERNAME)
+    _forwarder = _Forwarder(client, bot)
     print(f"[link-forwarder] user {me.id} -> bot {bot.id} ({BOT_USERNAME})", flush=True)
-    fw = _Forwarder(client, bot)
+    print("[link-forwarder] ready for links from bot ...", flush=True)
 
-    # Poll the DM instead of relying on live events (events did not fire
-    # reliably for this account in the Render thread).
-    head = await client.get_messages(bot, limit=1)
-    last_id = head[0].id if head else 0
-    print(f"[link-forwarder] polling bot DM from {last_id} ...", flush=True)
-
-    # Catch up on recent outgoing links that arrived before this deploy
-    # (e.g. links missed while live events were not firing).
-    recent = await client.get_messages(bot, limit=20)
-    for m in reversed(recent):
-        text = m.message or ""
-        if m.out and parse_link(text):
-            print(f"[link-forwarder] catch-up: {text[:120]}", flush=True)
-            await fw.submit(text)
     while True:
-        await asyncio.sleep(3)
-        try:
-            new = await client.get_messages(bot, min_id=last_id, limit=50)
-            for m in reversed(new):
-                last_id = max(last_id, m.id)
-                text = m.message or ""
-                if m.media and not text:
-                    continue
-                print(f"[link-forwarder] got: {text[:120]}", flush=True)
-                await fw.submit(text)
-        except FloodWaitError as exc:
-            print(f"[link-forwarder] FloodWait {exc.seconds}s", flush=True)
-            await asyncio.sleep(exc.seconds + 3)
-        except Exception as exc:
-            msg = str(exc).replace("\n", " ")[:300]
-            print(f"[link-forwarder] POLL ERROR {type(exc).__name__}: {msg}", flush=True)
-            if not await _ensure_connected(client):
-                await asyncio.sleep(10)
+        await asyncio.sleep(60)
+        await _ensure_connected(client)
 
 
 def start_link_forwarder():
